@@ -49,6 +49,7 @@ from app.services.research_orchestration import (
     CAPABILITY_MARKETPLACE,
     CAPABILITY_PUBLIC_CONTENT,
     CAPABILITY_SEARCH_DEMAND,
+    STATUS_UNEXPECTED_PROVIDER_ERROR,
     CapabilityCaps,
     CapabilityOutcome,
     run_preliminary_research,
@@ -721,6 +722,16 @@ class PreliminaryResearchRequest(BaseModel):
 
 
 class CapabilityOutcomeOut(BaseModel):
+    """One capability's honest outcome.
+
+    `status` is `COMPLETE`/`PARTIAL`/`FAILED` from the evidence snapshot, or
+    `NOT_REQUESTED`, `PROVIDER_FAILED` (anticipated provider failure), or
+    `UNEXPECTED_PROVIDER_ERROR` (a defect outside the provider contract).
+    `failure_reason` on an unexpected error carries the exception type, a
+    sanitized message, and a correlation id matching the server-side log —
+    never a stack trace, credential, or authorization header.
+    """
+
     capability: str
     status: str
     provider: str | None
@@ -734,6 +745,9 @@ class CapabilityOutcomeOut(BaseModel):
     quota_units_is_exact: bool | None
     cached_query_count: int
     failure_reason: str | None
+    # True only for a defect outside the provider contract, so a client can
+    # distinguish "the provider failed as it may" from "something is broken".
+    unexpected_error: bool = False
 
     @classmethod
     def from_outcome(cls, o: CapabilityOutcome) -> "CapabilityOutcomeOut":
@@ -751,6 +765,7 @@ class CapabilityOutcomeOut(BaseModel):
             quota_units_is_exact=o.quota_units_is_exact,
             cached_query_count=o.cached_query_count,
             failure_reason=o.failure_reason,
+            unexpected_error=o.status == STATUS_UNEXPECTED_PROVIDER_ERROR,
         )
 
 

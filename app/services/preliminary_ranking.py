@@ -267,7 +267,9 @@ def explain_pairwise(a: RankedCandidate, b: RankedCandidate) -> RankExplanation:
             reason=reason,
         )
 
-    # Unreachable in practice: candidate_id is unique and decides every tie.
+    # Reached only when two candidates share a candidate_id, which Milestone
+    # 1 generation does not produce (ids are uuid4). Handled rather than
+    # asserted so a degenerate input cannot crash an explanation.
     return RankExplanation(
         higher_candidate_id=higher.candidate_id,
         lower_candidate_id=lower.candidate_id,

@@ -15,8 +15,26 @@ failure is recorded as a capability outcome rather than aborting the run. A
 capability that produced nothing leaves its dimensions MISSING with a stated
 reason — never zero. Every capability's own caps, cache, cost, and quota
 accounting are preserved by delegating to its existing runner unchanged.
+
+Each capability invocation is wrapped in a defensive boundary with two arms:
+
+- ProviderError, anticipated by the provider contract, is reported as
+  PROVIDER_FAILED exactly as before.
+- Any other Exception — an adapter bug, a library error, anything
+  unforeseen — is reported as UNEXPECTED_PROVIDER_ERROR with the capability
+  name, exception type, a sanitized message, and a correlation id, while the
+  full traceback goes to the server-side log. The remaining capabilities
+  still run, and evidence already collected is preserved.
+
+This is the only place in the application that catches Exception broadly.
+BaseException still propagates, so cancellation and shutdown are never
+mistaken for a provider failure. A failed capability contributes no
+evidence, no fabricated value, and no zero substitution.
 """
 
+import logging
+import os
+import re
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
@@ -61,13 +79,119 @@ CAPABILITY_ORDER = (
     CAPABILITY_PUBLIC_CONTENT,
 )
 
+logger = logging.getLogger(__name__)
+
 # Capability statuses beyond the snapshot statuses.
 STATUS_NOT_REQUESTED = "NOT_REQUESTED"
+# The provider failed in a way its own contract anticipates (ProviderError).
 STATUS_PROVIDER_FAILED = "PROVIDER_FAILED"
+# The provider raised something outside its contract — an adapter bug, a
+# library error, anything unforeseen. Kept distinct from PROVIDER_FAILED so
+# an operator can tell a handled provider failure from a defect.
+STATUS_UNEXPECTED_PROVIDER_ERROR = "UNEXPECTED_PROVIDER_ERROR"
 
 MISSING_CAPABILITY_NOT_REQUESTED = "capability_not_requested"
 MISSING_CAPABILITY_FAILED = "capability_provider_failed"
+MISSING_CAPABILITY_UNEXPECTED_ERROR = "capability_unexpected_error"
 MISSING_NO_EVIDENCE_FOR_CANDIDATE = "no_evidence_returned_for_candidate"
+
+# Longest sanitized message surfaced through the API. An unexpected
+# exception's text is arbitrary; bounding it keeps a runaway message (or a
+# formatted traceback) out of the response.
+MAX_SANITIZED_ERROR_LENGTH = 200
+
+# Environment variables holding provider credentials. If a raw credential
+# value ever appears inside an exception message, it is replaced before the
+# message reaches a response.
+CREDENTIAL_ENV_VARS = (
+    "DATAFORSEO_LOGIN",
+    "DATAFORSEO_PASSWORD",
+    "ETSY_API_KEY",
+    "YOUTUBE_API_KEY",
+)
+
+REDACTED = "[REDACTED]"
+
+# Secret-shaped text, each paired with what replaces it. The key or scheme
+# is kept so a reader can tell what was redacted; the value never is.
+# Order matters. The auth-scheme rule runs before the key=value rule:
+# "Authorization: Bearer <token>" would otherwise have "Bearer" consumed as
+# the value, leaving the token itself in the text.
+_SECRET_SUBSTITUTIONS = (
+    # Authorization header values
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+"), r"\1 " + REDACTED),
+    # URL userinfo: scheme://user:pass@host
+    (re.compile(r"(?<=://)[^/\s:@]+:[^/\s@]+(?=@)"), REDACTED),
+    # key=value / key: value query params and kwargs
+    (
+        re.compile(
+            r"(?i)\b(api[_-]?key|apikey|key|access[_-]?token|token|password|passwd"
+            r"|secret|auth|authorization|signature|sig)\s*[=:]\s*[^\s&,;'\"\)]+"
+        ),
+        r"\1=" + REDACTED,
+    ),
+)
+
+_WHITESPACE = re.compile(r"\s+")
+
+# Traceback-shaped text embedded in an exception message. Real exceptions do
+# carry this (a wrapper re-raising a formatted trace, a subprocess error), and
+# it exposes internal file paths and line numbers.
+_TRACEBACK_MARKER = re.compile(
+    r"(?i)(traceback \(most recent call last\)|\bFile \"[^\"]*\", line \d+)"
+)
+
+TRACE_OMITTED = "[trace omitted]"
+
+
+def safe_exception_message(exc: BaseException) -> str:
+    """Render an exception's message without trusting its __str__.
+
+    A pathological exception whose __str__ raises would otherwise escape the
+    very boundary meant to contain it. The type name is always available, so
+    a failed render degrades to a placeholder rather than a lost run.
+    """
+    try:
+        return str(exc)
+    except Exception:  # noqa: BLE001 - a broken __str__ must not defeat the boundary
+        return "<exception message could not be rendered>"
+
+
+def sanitize_error_message(message: str) -> str:
+    """Strip anything secret-shaped out of an arbitrary exception message.
+
+    Applied only to unexpected exceptions, whose text answers to no contract
+    and may embed a request URL, an auth header, or a raw credential.
+    Newlines collapse to spaces, traceback-shaped text is cut at its first
+    marker so internal paths and line numbers never survive, and the result
+    is length-bounded.
+
+    This is defence in depth, not a guarantee: an adapter that formats a
+    secret into an exception in some shape not matched here would still leak
+    it. Adapters must not put credentials in exception text in the first
+    place; app/providers/* is written that way and tested for it.
+    """
+    text = _WHITESPACE.sub(" ", message).strip()
+
+    # Cut at the first traceback marker: everything after it is internal
+    # structure (file paths, line numbers), never information a caller needs.
+    marker = _TRACEBACK_MARKER.search(text)
+    if marker:
+        text = (text[: marker.start()].strip() + " " + TRACE_OMITTED).strip()
+
+    # Literal credential values first: the most direct leak, and one the
+    # pattern rules would miss if the value appears on its own.
+    for env_var in CREDENTIAL_ENV_VARS:
+        value = os.environ.get(env_var, "").strip()
+        if value:
+            text = text.replace(value, REDACTED)
+
+    for pattern, replacement in _SECRET_SUBSTITUTIONS:
+        text = pattern.sub(replacement, text)
+
+    if len(text) > MAX_SANITIZED_ERROR_LENGTH:
+        text = text[:MAX_SANITIZED_ERROR_LENGTH] + "..."
+    return text
 
 
 @dataclass(slots=True)
@@ -318,12 +442,49 @@ async def run_preliminary_research(
                 )
                 content_summaries = summaries
         except ProviderError as exc:
+            # Anticipated by the provider contract; adapters are written and
+            # tested not to put credentials in these messages, so the
+            # existing reporting is unchanged.
             outcomes.append(
                 CapabilityOutcome(
                     capability=capability,
                     status=STATUS_PROVIDER_FAILED,
                     provider=getattr(provider, "name", None),
                     failure_reason=f"{type(exc).__name__}: {exc}",
+                )
+            )
+            continue
+        except Exception as exc:  # noqa: BLE001 - deliberate capability boundary
+            # Outside the provider contract: an adapter bug, a library
+            # error, anything unforeseen. This is the ONLY place in the
+            # application that catches broadly, and it exists so one
+            # defective provider cannot destroy a run that other providers
+            # have already contributed valid evidence to.
+            #
+            # BaseException (KeyboardInterrupt, SystemExit, and
+            # asyncio.CancelledError) deliberately propagates: shutdown and
+            # task cancellation must not be swallowed as a provider failure.
+            #
+            # Nothing here becomes evidence. The capability is recorded as
+            # failed, its dimensions stay MISSING with a stated reason, and
+            # no value is fabricated or defaulted to zero.
+            error_id = uuid4()
+            logger.exception(
+                "Unexpected error in %s capability (provider=%s, error_id=%s)",
+                capability,
+                getattr(provider, "name", None),
+                error_id,
+            )
+            outcomes.append(
+                CapabilityOutcome(
+                    capability=capability,
+                    status=STATUS_UNEXPECTED_PROVIDER_ERROR,
+                    provider=getattr(provider, "name", None),
+                    failure_reason=(
+                        f"{type(exc).__name__}: "
+                        f"{sanitize_error_message(safe_exception_message(exc))} "
+                        f"(error_id={error_id})"
+                    ),
                 )
             )
             continue
@@ -382,6 +543,8 @@ def _missing_reasons(
             continue
         if outcome.status == STATUS_NOT_REQUESTED:
             reasons[dimension] = MISSING_CAPABILITY_NOT_REQUESTED
+        elif outcome.status == STATUS_UNEXPECTED_PROVIDER_ERROR:
+            reasons[dimension] = MISSING_CAPABILITY_UNEXPECTED_ERROR
         else:
             reasons[dimension] = MISSING_CAPABILITY_FAILED
     return reasons

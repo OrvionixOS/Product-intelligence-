@@ -53,8 +53,10 @@ from app.services.research_orchestration import (
     CAPABILITY_SEARCH_DEMAND,
     MISSING_CAPABILITY_FAILED,
     MISSING_CAPABILITY_NOT_REQUESTED,
+    MISSING_CAPABILITY_UNEXPECTED_ERROR,
     STATUS_NOT_REQUESTED,
     STATUS_PROVIDER_FAILED,
+    STATUS_UNEXPECTED_PROVIDER_ERROR,
     CapabilityCaps,
     run_preliminary_research,
 )
@@ -1183,3 +1185,417 @@ def test_legacy_scoring_module_is_retained_for_future_refactor():
     with pytest.warns(DeprecationWarning):
         result = scoring.score_opportunity(ScoreDimensions(search_demand=50.0), [])
     assert result.scoring_version, "results still record their algorithm version"
+
+
+# ------------------------------------ unexpected-exception capability boundary
+#
+# A provider that raises outside the ProviderError contract (an adapter bug,
+# a library error) must degrade only its own capability. These tests drive
+# each capability into an unexpected failure and assert the run survives.
+
+
+class UnexpectedSearchProvider(FakeSearchProvider):
+    async def fetch_keyword_metrics(self, keywords, location, language):
+        raise RuntimeError("adapter bug: unwrapped failure")
+
+
+class UnexpectedMarketplaceProvider(FakeMarketplaceProvider):
+    async def search_listings(self, query, limit):
+        raise KeyError("listing_id")
+
+
+class UnexpectedContentProvider(FakeContentProvider):
+    async def search_videos(self, query, limit):
+        raise TypeError("unexpected payload shape")
+
+
+def _outcomes(result) -> dict[str, Any]:
+    return {o.capability: o for o in result.capabilities}
+
+
+@pytest.mark.asyncio
+async def test_unexpected_search_demand_error_lets_other_capabilities_run():
+    """(1) search-demand RuntimeError -> marketplace and content still execute."""
+    candidates = [make_candidate("Alpha")]
+    _, marketplace, content = full_providers(candidates)
+    result = await orchestrate(
+        candidates,
+        search=UnexpectedSearchProvider({}),
+        marketplace=marketplace,
+        content=content,
+    )
+
+    outcomes = _outcomes(result)
+    assert outcomes[CAPABILITY_SEARCH_DEMAND].status == STATUS_UNEXPECTED_PROVIDER_ERROR
+    # search_demand runs first, so this is the case that previously aborted
+    # the run before the other two providers were ever invoked.
+    assert marketplace.search_calls, "marketplace must still have been called"
+    assert content.search_calls, "public-content must still have been called"
+    assert outcomes[CAPABILITY_MARKETPLACE].status == SnapshotStatus.COMPLETE.value
+    assert outcomes[CAPABILITY_PUBLIC_CONTENT].status == SnapshotStatus.COMPLETE.value
+
+
+@pytest.mark.asyncio
+async def test_unexpected_marketplace_error_lets_other_capabilities_survive():
+    """(2) marketplace raises an unexpected exception."""
+    candidates = [make_candidate("Alpha")]
+    search, _, content = full_providers(candidates)
+    result = await orchestrate(
+        candidates,
+        search=search,
+        marketplace=UnexpectedMarketplaceProvider({}),
+        content=content,
+    )
+
+    outcomes = _outcomes(result)
+    assert outcomes[CAPABILITY_MARKETPLACE].status == STATUS_UNEXPECTED_PROVIDER_ERROR
+    assert outcomes[CAPABILITY_SEARCH_DEMAND].status == SnapshotStatus.COMPLETE.value
+    assert outcomes[CAPABILITY_PUBLIC_CONTENT].status == SnapshotStatus.COMPLETE.value
+
+
+@pytest.mark.asyncio
+async def test_unexpected_public_content_error_lets_other_capabilities_survive():
+    """(3) public-content raises an unexpected exception."""
+    candidates = [make_candidate("Alpha")]
+    search, marketplace, _ = full_providers(candidates)
+    result = await orchestrate(
+        candidates,
+        search=search,
+        marketplace=marketplace,
+        content=UnexpectedContentProvider({}),
+    )
+
+    outcomes = _outcomes(result)
+    assert outcomes[CAPABILITY_PUBLIC_CONTENT].status == STATUS_UNEXPECTED_PROVIDER_ERROR
+    assert outcomes[CAPABILITY_SEARCH_DEMAND].status == SnapshotStatus.COMPLETE.value
+    assert outcomes[CAPABILITY_MARKETPLACE].status == SnapshotStatus.COMPLETE.value
+
+
+@pytest.mark.asyncio
+async def test_evidence_collected_before_and_after_a_failure_is_preserved():
+    """(4) Marketplace fails between two healthy capabilities; both survive."""
+    candidates = [make_candidate("Alpha")]
+    search, _, content = full_providers(candidates)
+    result = await orchestrate(
+        candidates,
+        search=search,  # runs before the failure
+        marketplace=UnexpectedMarketplaceProvider({}),
+        content=content,  # runs after the failure
+    )
+
+    profile = result.profiles[0]
+    # Evidence from the capability before the failure.
+    demand = profile.dimension(DIM_SEARCH_DEMAND)
+    assert demand.state == DimensionState.SCORED
+    assert demand.contributing_evidence_ids
+    # Evidence from the capability after the failure.
+    audience = profile.dimension(DIM_AUDIENCE_INTEREST)
+    assert audience.state == DimensionState.SCORED
+    assert audience.contributing_evidence_ids
+    # Provenance of the survivors is intact.
+    assert demand.providers == ("fake-search",)
+    assert audience.providers == ("fake-content",)
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_is_distinguishable_from_provider_error():
+    """(5) The two failure kinds carry different statuses and reasons."""
+    candidates = [make_candidate("Alpha", marketplace_queries=["q"])]
+
+    expected = await orchestrate(
+        candidates,
+        marketplace=FakeMarketplaceProvider({"q": [listing_for("L1")]}, fail_queries={"q"}),
+    )
+    unexpected = await orchestrate(
+        candidates, marketplace=UnexpectedMarketplaceProvider({})
+    )
+
+    expected_outcome = _outcomes(expected)[CAPABILITY_MARKETPLACE]
+    unexpected_outcome = _outcomes(unexpected)[CAPABILITY_MARKETPLACE]
+
+    # An anticipated ProviderError still degrades to a snapshot status and
+    # records the error in provider_errors, exactly as before this boundary.
+    assert expected_outcome.status == SnapshotStatus.FAILED.value
+    assert expected_outcome.provider_errors
+    assert expected_outcome.status != STATUS_UNEXPECTED_PROVIDER_ERROR
+
+    # An unexpected exception is a distinct, typed outcome.
+    assert unexpected_outcome.status == STATUS_UNEXPECTED_PROVIDER_ERROR
+    assert "KeyError" in unexpected_outcome.failure_reason
+    assert "error_id=" in unexpected_outcome.failure_reason
+
+    # The dimensions name which kind of failure left them without evidence.
+    assert (
+        expected.profiles[0].dimension(DIM_PRICE_EVIDENCE).missing_reason
+        == MISSING_CAPABILITY_FAILED
+    )
+    assert (
+        unexpected.profiles[0].dimension(DIM_PRICE_EVIDENCE).missing_reason
+        == MISSING_CAPABILITY_UNEXPECTED_ERROR
+    )
+
+
+@pytest.mark.asyncio
+async def test_unexpectedly_failed_capability_produces_no_fake_evidence():
+    """(6) No fabricated evidence, no zero, no inferred measurement."""
+    candidates = [make_candidate("Alpha")]
+    result = await orchestrate(
+        candidates,
+        search=UnexpectedSearchProvider({}),
+        marketplace=UnexpectedMarketplaceProvider({}),
+        content=UnexpectedContentProvider({}),
+    )
+
+    profile = result.profiles[0]
+    for name in PRELIMINARY_DIMENSION_NAMES:
+        dimension = profile.dimension(name)
+        assert dimension.state == DimensionState.MISSING
+        assert dimension.value is None, f"{name} must not be fabricated"
+        assert dimension.value_truth_class is None, f"{name} must not be INFERRED"
+        assert dimension.evidence_truth_basis is None
+        assert dimension.contributing_evidence_ids == ()
+        assert dimension.observed_input_count == 0
+        assert dimension.missing_reason == MISSING_CAPABILITY_UNEXPECTED_ERROR
+    assert profile.present_dimension_count == 0
+    # The exception itself never became an evidence record.
+    assert all(o.snapshot_id is None for o in result.capabilities)
+
+
+@pytest.mark.asyncio
+async def test_ranking_stays_deterministic_on_surviving_evidence():
+    """(7) Preliminary ranking still works, deterministically, after a failure."""
+    candidates = [make_candidate(f"Cand {i}") for i in range(7)]
+
+    async def one_run():
+        search, _, content = full_providers(candidates)
+        result = await orchestrate(
+            candidates,
+            search=search,
+            marketplace=UnexpectedMarketplaceProvider({}),
+            content=content,
+        )
+        return result, [
+            (r.rank, r.candidate_id, tuple(c.value for c in r.criteria))
+            for r in result.ranking.ranked
+        ]
+
+    first_result, first = await one_run()
+    _, second = await one_run()
+
+    assert first == second, "ranking must stay deterministic after a failure"
+    assert len(first_result.ranking.ranked) == 7
+    assert len(first_result.ranking.selected) == DEEP_RESEARCH_SELECTION_SIZE
+    # Ordering is decided by the surviving evidence, and remains explainable.
+    for higher, lower in zip(
+        first_result.ranking.ranked, first_result.ranking.ranked[1:]
+    ):
+        assert explain_pairwise(higher, lower).deciding_criterion in CRITERIA_ORDER
+
+
+def test_no_sensitive_exception_information_leaks_through_the_api(monkeypatch):
+    """(8) No traceback, credential, api key, or auth header in the response."""
+    from fastapi.testclient import TestClient
+
+    from app.api import routes
+    from app.main import app
+
+    secret = "yt-super-secret-key-abc123"
+    monkeypatch.setenv("YOUTUBE_API_KEY", secret)
+
+    class LeakyContentProvider(FakeContentProvider):
+        async def search_videos(self, query, limit):
+            raise RuntimeError(
+                "GET https://www.googleapis.com/youtube/v3/search"
+                f"?q=x&key={secret} failed\n"
+                "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig\n"
+                'Traceback (most recent call last):\n  File "adapter.py", line 42'
+            )
+
+    candidates = [make_candidate("Alpha")]
+    search, marketplace, _ = full_providers(candidates)
+    monkeypatch.setitem(routes.SEARCH_DEMAND_PROVIDERS, "dataforseo", lambda: search)
+    monkeypatch.setitem(routes.MARKETPLACE_PROVIDERS, "etsy", lambda: marketplace)
+    monkeypatch.setitem(
+        routes.PUBLIC_CONTENT_PROVIDERS, "youtube", lambda: LeakyContentProvider({})
+    )
+
+    response = TestClient(app).post(
+        "/research/preliminary",
+        json={"candidates": [c.model_dump(mode="json") for c in candidates]},
+    )
+    assert response.status_code == 200, response.text
+    body = response.text
+
+    for leaked in (
+        secret,
+        "eyJhbGciOiJIUzI1NiJ9.payload.sig",
+        "Traceback",
+        "adapter.py",
+        "line 42",
+        "Bearer ey",
+    ):
+        assert leaked not in body, f"response leaked {leaked!r}"
+
+    outcome = next(
+        c for c in response.json()["capabilities"]
+        if c["capability"] == CAPABILITY_PUBLIC_CONTENT
+    )
+    assert outcome["status"] == STATUS_UNEXPECTED_PROVIDER_ERROR
+    assert outcome["unexpected_error"] is True
+    # Enough to debug with: capability, exception type, correlation id.
+    assert "RuntimeError" in outcome["failure_reason"]
+    assert "error_id=" in outcome["failure_reason"]
+    assert "[REDACTED]" in outcome["failure_reason"]
+    # The run still produced a ranking from the surviving capabilities.
+    assert len(response.json()["ranked"]) == 1
+
+
+def test_sanitizer_redacts_secret_shapes():
+    """Unit coverage for the sanitizer's rules, including rule ordering."""
+    from app.services.research_orchestration import sanitize_error_message
+
+    cases = {
+        "https://api.x/v3?q=a&key=SECRETVALUE": "SECRETVALUE",
+        "Authorization: Bearer abc.def.ghi": "abc.def.ghi",
+        "Authorization: Basic dXNlcjpwYXNz": "dXNlcjpwYXNz",
+        "https://user:hunter2@api.example.com": "hunter2",
+        "token=eyJhbGciOi.J9.sig": "eyJhbGciOi.J9.sig",
+        "api_key=abc123&safe=fine": "abc123",
+        "password: hunter2": "hunter2",
+    }
+    for text, secret in cases.items():
+        cleaned = sanitize_error_message(text)
+        assert secret not in cleaned, f"{text!r} leaked {secret!r} as {cleaned!r}"
+        assert "[REDACTED]" in cleaned
+
+    # Newlines collapse, so a formatted traceback cannot survive multi-line.
+    assert "\n" not in sanitize_error_message("a\nb\nc")
+    # Traceback-shaped text is cut, so internal paths never survive.
+    for trace in (
+        'boom\nTraceback (most recent call last):\n  File "adapter.py", line 42',
+        'wrapped: File "/srv/app/config.py", line 9, in load',
+    ):
+        cleaned = sanitize_error_message(trace)
+        assert "Traceback" not in cleaned
+        assert "adapter.py" not in cleaned and "config.py" not in cleaned
+        assert "line 42" not in cleaned and "line 9" not in cleaned
+        assert "[trace omitted]" in cleaned
+    # Length is bounded.
+    assert len(sanitize_error_message("x" * 5000)) <= 205
+
+
+def test_sanitizer_redacts_literal_credential_values(monkeypatch):
+    from app.services.research_orchestration import sanitize_error_message
+
+    monkeypatch.setenv("ETSY_API_KEY", "etsy-keystring-xyz")
+    cleaned = sanitize_error_message("bare etsy-keystring-xyz appeared in text")
+    assert "etsy-keystring-xyz" not in cleaned
+    assert "[REDACTED]" in cleaned
+
+
+@pytest.mark.asyncio
+async def test_boundary_does_not_swallow_cancellation():
+    """BaseException must propagate: shutdown is not a provider failure."""
+    import asyncio
+
+    class CancellingProvider(FakeSearchProvider):
+        async def fetch_keyword_metrics(self, keywords, location, language):
+            raise asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
+        await orchestrate([make_candidate("Alpha")], search=CancellingProvider({}))
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_is_logged_server_side_with_traceback(caplog):
+    """The full exception is logged for debugging, not returned to callers."""
+    import logging
+
+    candidates = [make_candidate("Alpha")]
+    with caplog.at_level(logging.ERROR, logger="app.services.research_orchestration"):
+        result = await orchestrate(candidates, search=UnexpectedSearchProvider({}))
+
+    record = next(
+        r for r in caplog.records if r.name == "app.services.research_orchestration"
+    )
+    assert record.exc_info is not None, "traceback must reach the server-side log"
+    assert "search_demand" in record.getMessage()
+    outcome = _outcomes(result)[CAPABILITY_SEARCH_DEMAND]
+    error_id = outcome.failure_reason.split("error_id=")[1].rstrip(")")
+    assert error_id in record.getMessage(), "log and response must correlate"
+
+
+@pytest.mark.asyncio
+async def test_boundary_survives_an_exception_whose_str_raises():
+    """A pathological __str__ must not defeat the boundary meant to contain it."""
+
+    class Pathological(Exception):
+        def __str__(self):
+            raise ValueError("__str__ itself raises")
+
+    class PathologicalProvider(FakeSearchProvider):
+        async def fetch_keyword_metrics(self, keywords, location, language):
+            raise Pathological("x")
+
+    candidates = [make_candidate("Alpha")]
+    _, marketplace, content = full_providers(candidates)
+    result = await orchestrate(
+        candidates,
+        search=PathologicalProvider({}),
+        marketplace=marketplace,
+        content=content,
+    )
+
+    outcomes = _outcomes(result)
+    assert outcomes[CAPABILITY_SEARCH_DEMAND].status == STATUS_UNEXPECTED_PROVIDER_ERROR
+    # The type name still identifies it, even with no renderable message.
+    assert "Pathological" in outcomes[CAPABILITY_SEARCH_DEMAND].failure_reason
+    assert outcomes[CAPABILITY_MARKETPLACE].status == SnapshotStatus.COMPLETE.value
+    assert outcomes[CAPABILITY_PUBLIC_CONTENT].status == SnapshotStatus.COMPLETE.value
+
+
+@pytest.mark.asyncio
+async def test_every_capability_failing_unexpectedly_still_yields_a_run():
+    """Total unexpected failure degrades honestly instead of crashing."""
+
+    class S(FakeSearchProvider):
+        async def fetch_keyword_metrics(self, *a, **k):
+            raise RuntimeError("s")
+
+    class M(FakeMarketplaceProvider):
+        async def search_listings(self, *a, **k):
+            raise RuntimeError("m")
+
+    class C(FakeContentProvider):
+        async def search_videos(self, *a, **k):
+            raise RuntimeError("c")
+
+    candidates = [make_candidate("Alpha"), make_candidate("Beta")]
+    result = await orchestrate(
+        candidates, search=S({}), marketplace=M({}), content=C({})
+    )
+
+    assert all(
+        o.status == STATUS_UNEXPECTED_PROVIDER_ERROR for o in result.capabilities
+    )
+    assert len(result.ranking.ranked) == 2
+    for profile in result.profiles:
+        assert profile.present_dimension_count == 0
+        for dimension in profile.dimensions.values():
+            assert dimension.value is None
+
+
+@pytest.mark.asyncio
+async def test_error_ids_are_unique_per_failure():
+    """Each failure gets its own correlation id, so logs stay distinguishable."""
+
+    class S(FakeSearchProvider):
+        async def fetch_keyword_metrics(self, *a, **k):
+            raise RuntimeError("boom")
+
+    seen = set()
+    for _ in range(3):
+        result = await orchestrate([make_candidate("Alpha")], search=S({}))
+        reason = _outcomes(result)[CAPABILITY_SEARCH_DEMAND].failure_reason
+        seen.add(reason.split("error_id=")[1])
+    assert len(seen) == 3

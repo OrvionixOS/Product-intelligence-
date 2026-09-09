@@ -367,6 +367,15 @@ Copy `.env.example` and fill in real values (never commit them):
 - `PUBLIC_CONTENT_MAX_QUOTA_UNITS` — quota units spent per request (default 1000)
 - `PUBLIC_CONTENT_MAX_CHANNEL_LOOKUPS` — batched channel-stats calls per request (default 2; 0 disables)
 
+### Known technical debt
+
+- **Unbounded in-memory research store.** `ResearchStore` is a process-wide,
+  append-only, in-memory store with no eviction, so snapshots and evidence
+  accumulate for the life of the process. Milestone 3C adds three snapshots
+  per preliminary run rather than one, which reaches the limit sooner.
+  Deferred deliberately: it is resolved by the persistence milestone that
+  implements `schema.sql`, not by patching the in-memory seam.
+
 ## Run locally
 
 ```bash
