@@ -2,9 +2,16 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from .enums import CandidateStatus, Classification, EvidencePurpose, ProductFormat, TruthClass
+from .enums import (
+    CandidateStatus,
+    Classification,
+    EvidencePurpose,
+    ProductFormat,
+    SnapshotStatus,
+    TruthClass,
+)
 
 
 class Candidate(BaseModel):
@@ -30,8 +37,19 @@ class Candidate(BaseModel):
 
 
 class EvidenceItem(BaseModel):
+    """An immutable observation attached to an opportunity or candidate.
+
+    Frozen: once created, an evidence record is never edited. A later research
+    run creates new records under a new snapshot instead of overwriting.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
     id: UUID = Field(default_factory=uuid4)
-    opportunity_id: UUID
+    opportunity_id: UUID | None = None
+    candidate_id: UUID | None = None
+    research_run_id: UUID | None = None
+    snapshot_id: UUID | None = None
     signal_type: str
     purpose: EvidencePurpose
     truth_class: TruthClass
@@ -40,6 +58,7 @@ class EvidenceItem(BaseModel):
     source_reference: str | None = None
     source_url: str | None = None
     collected_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    retrieved_at: datetime | None = None
     geography: str | None = None
     language: str | None = None
     platform: str | None = None
@@ -47,6 +66,7 @@ class EvidenceItem(BaseModel):
     raw_value: float | str | None = None
     unit: str | None = None
     normalized_value: float | None = Field(default=None, ge=0, le=100)
+    sample_size: int | None = None
     directness: float = Field(default=0.5, ge=0, le=1)
     source_quality: float = Field(default=0.5, ge=0, le=1)
     sample_adequacy: float = Field(default=0.5, ge=0, le=1)
@@ -59,6 +79,29 @@ class EvidenceItem(BaseModel):
     provider_version: str | None = None
     normalization_version: str = "v0.1"
     raw_payload: dict[str, Any] | None = None
+    raw_payload_hash: str | None = None
+
+
+class EvidenceSnapshot(BaseModel):
+    """Metadata for the evidence collected during one research run pass.
+
+    Snapshots are immutable once finalized; a later run creates a new one.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    snapshot_id: UUID = Field(default_factory=uuid4)
+    research_run_id: UUID
+    provider: str
+    started_at: datetime
+    completed_at: datetime | None = None
+    geography: str
+    language: str
+    status: SnapshotStatus
+    provider_call_count: int = 0
+    provider_cost: float | None = None
+    provider_cost_is_estimate: bool | None = None
+    normalization_version: str
 
 
 class ScoreDimensions(BaseModel):
