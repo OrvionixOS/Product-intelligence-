@@ -10,7 +10,7 @@ class TruthClass(str, Enum):
 
 class EvidencePurpose(str, Enum):
     PURCHASE = "PURCHASE"
-    SEARCH = "SEARCH"
+    SEARCH_DEMAND = "SEARCH_DEMAND"
     AUDIENCE = "AUDIENCE"
     CONTENT = "CONTENT"
     QUALITATIVE = "QUALITATIVE"
@@ -40,3 +40,10 @@ class CandidateStatus(str, Enum):
     RESEARCHING = "RESEARCHING"
     RESEARCHED = "RESEARCHED"
     REJECTED = "REJECTED"
+
+
+class SnapshotStatus(str, Enum):
+    PENDING = "PENDING"
+    COMPLETE = "COMPLETE"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"

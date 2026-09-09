@@ -41,9 +41,27 @@ create table if not exists candidates (
   created_at timestamptz not null default now()
 );
 
+create table if not exists evidence_snapshots (
+  snapshot_id uuid primary key default gen_random_uuid(),
+  research_run_id uuid not null references research_runs(id) on delete cascade,
+  provider text not null,
+  started_at timestamptz not null,
+  completed_at timestamptz,
+  geography text not null,
+  language text not null,
+  status text not null check (status in ('PENDING','COMPLETE','PARTIAL','FAILED')),
+  provider_call_count integer not null default 0,
+  provider_cost numeric(12,6),
+  provider_cost_is_estimate boolean,
+  normalization_version text not null
+);
+
 create table if not exists evidence_items (
   id uuid primary key default gen_random_uuid(),
-  opportunity_id uuid not null references opportunities(id) on delete cascade,
+  opportunity_id uuid references opportunities(id) on delete cascade,
+  candidate_id uuid references candidates(id) on delete cascade,
+  research_run_id uuid references research_runs(id) on delete cascade,
+  snapshot_id uuid references evidence_snapshots(snapshot_id) on delete cascade,
   signal_type text not null,
   purpose text not null,
   truth_class text not null check (truth_class in ('OBSERVED','ESTIMATED','INFERRED','UNKNOWN')),
@@ -52,6 +70,7 @@ create table if not exists evidence_items (
   source_reference text,
   source_url text,
   collected_at timestamptz not null default now(),
+  retrieved_at timestamptz,
   geography text,
   language text,
   platform text,
@@ -59,6 +78,7 @@ create table if not exists evidence_items (
   raw_value jsonb,
   unit text,
   normalized_value numeric(6,2) check (normalized_value between 0 and 100),
+  sample_size integer,
   directness numeric(5,4) not null default 0.5,
   source_quality numeric(5,4) not null default 0.5,
   sample_adequacy numeric(5,4) not null default 0.5,
@@ -92,5 +112,8 @@ create index if not exists idx_opportunities_research_run on opportunities(resea
 create index if not exists idx_candidates_seed_keyword on candidates(seed_keyword);
 create index if not exists idx_candidates_status on candidates(status);
 create index if not exists idx_evidence_opportunity on evidence_items(opportunity_id);
+create index if not exists idx_evidence_candidate on evidence_items(candidate_id);
+create index if not exists idx_evidence_snapshot on evidence_items(snapshot_id);
+create index if not exists idx_snapshots_research_run on evidence_snapshots(research_run_id);
 create index if not exists idx_evidence_provider_collected on evidence_items(provider, collected_at desc);
 create index if not exists idx_scores_opportunity_calculated on score_versions(opportunity_id, calculated_at desc);

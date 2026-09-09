@@ -9,7 +9,7 @@ def observed_evidence(**overrides):
     payload = dict(
         opportunity_id=uuid4(),
         signal_type="search_volume",
-        purpose=EvidencePurpose.SEARCH,
+        purpose=EvidencePurpose.SEARCH_DEMAND,
         truth_class=TruthClass.OBSERVED,
         provider="test",
         collection_method="official_api",
