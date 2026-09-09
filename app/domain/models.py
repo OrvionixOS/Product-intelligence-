@@ -4,7 +4,29 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-from .enums import Classification, EvidencePurpose, TruthClass
+from .enums import CandidateStatus, Classification, EvidencePurpose, ProductFormat, TruthClass
+
+
+class Candidate(BaseModel):
+    """A proposed digital-product opportunity.
+
+    A candidate is a hypothesis, not evidence. Nothing on this model implies
+    demand, validation, or market fit; those are established later by the
+    research and scoring pipeline.
+    """
+
+    id: UUID = Field(default_factory=uuid4)
+    seed_keyword: str
+    title: str
+    problem: str
+    target_buyer: str
+    proposed_format: ProductFormat
+    buyer_outcome: str
+    search_queries: list[str] = Field(min_length=1)
+    marketplace_queries: list[str] = Field(min_length=1)
+    content_queries: list[str] = Field(min_length=1)
+    generation_reason: str
+    status: CandidateStatus = CandidateStatus.UNRESEARCHED
 
 
 class EvidenceItem(BaseModel):

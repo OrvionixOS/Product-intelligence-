@@ -19,6 +19,28 @@ create table if not exists opportunities (
   created_at timestamptz not null default now()
 );
 
+create table if not exists candidates (
+  id uuid primary key default gen_random_uuid(),
+  research_run_id uuid references research_runs(id) on delete cascade,
+  seed_keyword text not null,
+  title text not null,
+  problem text not null,
+  target_buyer text not null,
+  proposed_format text not null check (proposed_format in (
+    'PDF_GUIDE','WORKBOOK','CHECKLIST','TEMPLATE_PACK',
+    'SPREADSHEET_TOOL','DATA_TEMPLATE','PRINTABLE_BUNDLE'
+  )),
+  buyer_outcome text not null,
+  search_queries jsonb not null default '[]'::jsonb,
+  marketplace_queries jsonb not null default '[]'::jsonb,
+  content_queries jsonb not null default '[]'::jsonb,
+  generation_reason text not null,
+  status text not null default 'UNRESEARCHED' check (status in (
+    'UNRESEARCHED','RESEARCHING','RESEARCHED','REJECTED'
+  )),
+  created_at timestamptz not null default now()
+);
+
 create table if not exists evidence_items (
   id uuid primary key default gen_random_uuid(),
   opportunity_id uuid not null references opportunities(id) on delete cascade,
@@ -67,6 +89,8 @@ create table if not exists score_versions (
 );
 
 create index if not exists idx_opportunities_research_run on opportunities(research_run_id);
+create index if not exists idx_candidates_seed_keyword on candidates(seed_keyword);
+create index if not exists idx_candidates_status on candidates(status);
 create index if not exists idx_evidence_opportunity on evidence_items(opportunity_id);
 create index if not exists idx_evidence_provider_collected on evidence_items(provider, collected_at desc);
 create index if not exists idx_scores_opportunity_calculated on score_versions(opportunity_id, calculated_at desc);
