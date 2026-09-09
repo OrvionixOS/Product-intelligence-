@@ -140,6 +140,10 @@ LIMITATIONS = (
     "ratio of reviews to purchases is unknown and is not estimated here.",
     "Exact competitor sales and revenue are not public and remain UNKNOWN.",
     "Listing presence shows an observable paid market, not competitor performance.",
+    "top_seller_proxy_share is a share of OBSERVED REVIEW COUNTS. It is not market "
+    "share, not revenue share, not a share of units sold, and not a share of buyers.",
+    "Pattern labels describe the STRUCTURE of the evidence, not whether an "
+    "opportunity is good or bad. No pattern is ranked above another.",
     "Search-ranked marketplace results are a provider-ordered sample, not the full market.",
     "Derived statistics are INFERRED from OBSERVED public fields; they are not observations.",
     "Market-validation pattern thresholds are unvalidated V1 assumptions, not findings.",
@@ -189,7 +193,15 @@ class MarketValidationPattern(str, Enum):
     # Proxy volume is dominated by a single seller.
     CONCENTRATED = "CONCENTRATED"
     # Several sellers carry proxy evidence, none dominant.
-    MULTIPLE_ESTABLISHED = "MULTIPLE_ESTABLISHED"
+    #
+    # Named for what the classifier actually checks: seller breadth. It
+    # deliberately does NOT claim the sellers are established, because the
+    # classifier never consults listing age. Establishment is reported
+    # separately as established_listing_count / established_seller_count.
+    # Gating the pattern on age would make it collapse to WEAK_PROXY
+    # whenever the marketplace omits creation dates, turning a data-quality
+    # gap into what would read as a market finding.
+    MULTIPLE_SELLERS = "MULTIPLE_SELLERS"
     # Proxy evidence spans many distinct sellers.
     DISTRIBUTED = "DISTRIBUTED"
 
@@ -470,7 +482,7 @@ def _classify(features: PurchaseEvidenceFeatures) -> MarketValidationPattern:
         return MarketValidationPattern.CONCENTRATED
     if features.sellers_with_proxy_evidence >= MIN_SELLERS_FOR_DISTRIBUTED:
         return MarketValidationPattern.DISTRIBUTED
-    return MarketValidationPattern.MULTIPLE_ESTABLISHED
+    return MarketValidationPattern.MULTIPLE_SELLERS
 
 
 def _build_features(

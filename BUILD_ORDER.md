@@ -58,7 +58,7 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - Direct/authorized transactional evidence interface reserved but NOT
   implemented: no seller OAuth, no connected-store transactions
 - `market_validation_pattern_v1`: describes the SHAPE of proxy evidence
-  (absent / unknown / weak / concentrated / multiple-established /
+  (absent / unknown / weak / concentrated / multiple-sellers /
   distributed), explicitly not a ranking of desirability
 - No 0-100 score: no purchase-evidence formula is approved, so the
   dimension returns EVIDENCE_PRESENT_UNSCORED rather than inventing one

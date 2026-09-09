@@ -449,7 +449,7 @@ deliberately not ranked — DISTRIBUTED is not "better" than CONCENTRATED:
 | `NO_PUBLIC_PROXY` | Review counts measured, all zero |
 | `WEAK_PROXY` | Proxy evidence on very few listings or one seller |
 | `CONCENTRATED` | Proxy volume dominated by a single seller |
-| `MULTIPLE_ESTABLISHED` | Several sellers carry proxy evidence, none dominant |
+| `MULTIPLE_SELLERS` | Several sellers carry proxy evidence, none dominant. Does **not** claim they are established — the classifier never checks listing age; `established_listing_count` reports that separately |
 | `DISTRIBUTED` | Proxy evidence spans many distinct sellers |
 
 `top_seller_proxy_share` is the share of **observed review counts** held by
@@ -476,14 +476,20 @@ any sample size, are still reported.
 Every threshold below is an unvalidated **V1 assumption**, versioned by
 `market_validation_pattern_v1`, appearing in no approved specification:
 
-| Threshold | Value | Meaning |
-| --- | --- | --- |
-| `MIN_REVIEWS_FOR_PROXY` | 1 | Reviews before a listing counts as carrying proxy evidence |
-| `ESTABLISHED_LISTING_MIN_AGE_DAYS` | 180 | Age before a listing is "established" |
-| `MIN_SELLERS_FOR_MULTIPLE` | 2 | Sellers below which proxy evidence is "weak" |
-| `MIN_SELLERS_FOR_DISTRIBUTED` | 4 | Sellers at which evidence is "distributed" |
-| `CONCENTRATION_DOMINANCE_THRESHOLD` | 0.6 | Top-seller proxy share treated as concentrated |
-| `WEAK_PROXY_MAX_LISTINGS` | 2 | Listings at or below which the signal is weak |
+| Threshold | Value | Basis | Affects |
+| --- | --- | --- | --- |
+| `MIN_REVIEWS_FOR_PROXY` | 1 | **Definitional.** "At least one review exists" is the boundary between some evidence and none; any higher value would be pure judgment | pattern + counts |
+| `MIN_SELLERS_FOR_MULTIPLE` | 2 | **Definitional.** "Multiple" cannot mean fewer than two | pattern |
+| `ESTABLISHED_LISTING_MIN_AGE_DAYS` | 180 | **Unvalidated heuristic** | two reported counts only — not the pattern |
+| `MIN_SELLERS_FOR_DISTRIBUTED` | 4 | **Unvalidated heuristic.** 3 or 5 would be equally defensible | pattern |
+| `CONCENTRATION_DOMINANCE_THRESHOLD` | 0.6 | **Unvalidated heuristic.** No external benchmark is claimed | pattern |
+| `WEAK_PROXY_MAX_LISTINGS` | 2 | **Unvalidated heuristic** | pattern |
+
+Two of the six are definitional rather than arbitrary; the other four are
+judgment calls that could reasonably be set differently. None is supported
+by any approved specification, none has been validated against outcome data,
+and no external benchmark is claimed for any of them. Changing any value is
+a change to `market_validation_pattern_v1` and should be versioned as one.
 
 #### Known limitations
 

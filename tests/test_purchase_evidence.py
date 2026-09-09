@@ -264,13 +264,13 @@ def test_distributed_proxy_evidence_across_many_sellers():
     assert result.state == DimensionState.EVIDENCE_PRESENT_UNSCORED
 
 
-def test_few_sellers_with_proxy_is_multiple_established_not_distributed():
+def test_few_sellers_with_proxy_is_multiple_sellers_not_distributed():
     listings = [
         comparable("L1", review_count=30, seller_id="shop-a"),
         comparable("L2", review_count=25, seller_id="shop-b"),
         comparable("L3", review_count=28, seller_id="shop-c"),
     ]
-    assert extract(listings).pattern == MarketValidationPattern.MULTIPLE_ESTABLISHED
+    assert extract(listings).pattern == MarketValidationPattern.MULTIPLE_SELLERS
 
 
 def test_single_seller_proxy_is_weak_not_distributed():
@@ -888,3 +888,82 @@ def test_winsorized_mean_is_withheld_below_the_minimum_sample():
     large_features = extract(large).features
     assert large_features.winsorized_mean_review_count is not None
     assert large_features.winsorized_mean_review_count < 999999
+
+
+def test_pattern_labels_do_not_overclaim_establishment():
+    """MULTIPLE_SELLERS must not assert establishment it never checked.
+
+    The classifier consults seller breadth, never listing age. A label
+    saying "established" would assert something unverified — and would be
+    plainly false for listings created yesterday.
+    """
+    brand_new = [
+        comparable(f"N{i}", review_count=10, seller_id=f"s{i}", age_days=1)
+        for i in range(3)
+    ]
+    result = extract(brand_new)
+
+    assert result.pattern == MarketValidationPattern.MULTIPLE_SELLERS
+    assert result.features.established_listing_count == 0
+    assert "ESTABLISHED" not in result.pattern.value
+    # Establishment is reported separately, so a consumer can combine them.
+    assert result.features.established_seller_count == 0
+
+    # Long-lived listings produce the same pattern with establishment set.
+    established = [
+        comparable(f"E{i}", review_count=10, seller_id=f"s{i}", age_days=400)
+        for i in range(3)
+    ]
+    established_result = extract(established)
+    assert established_result.pattern == MarketValidationPattern.MULTIPLE_SELLERS
+    assert established_result.features.established_listing_count == 3
+
+
+def test_no_pattern_label_claims_more_than_the_classifier_checks():
+    """Every pattern name must be justified by the fields _classify reads."""
+    import inspect
+
+    from app.services import purchase_evidence as pe
+
+    classifier_source = inspect.getsource(pe._classify)
+    # The classifier reads only these feature fields; any label implying a
+    # different fact would be an unsupported claim.
+    assert "established" not in classifier_source
+    assert "currenc" not in classifier_source
+    assert "price" not in classifier_source
+    for member in MarketValidationPattern:
+        assert "ESTABLISHED" not in member.value
+        assert "REVENUE" not in member.value
+        assert "SALES" not in member.value
+
+
+def test_limitations_disclaim_market_share_and_desirability_in_the_payload():
+    """A consumer reading only the API payload must see both disclaimers."""
+    result = extract(
+        [comparable(f"L{i}", review_count=10, seller_id=f"s{i}") for i in range(5)]
+    )
+    text = " ".join(result.limitations).lower()
+
+    assert "not market share" in text
+    assert "not revenue share" in text
+    assert "not a share of units sold" in text
+    # And that the patterns are structural, not evaluative.
+    assert "not whether an opportunity is good or bad" in text
+    assert "no pattern is ranked above another" in text
+
+
+def test_pattern_enum_carries_no_ordering_or_desirability_ranking():
+    """The pattern must not be comparable, scored, or otherwise ranked."""
+    a = MarketValidationPattern.WEAK_PROXY
+    b = MarketValidationPattern.DISTRIBUTED
+
+    # str-Enum members compare as strings, never as an ordered scale, and no
+    # numeric or ranking helper exists that would imply one is "better".
+    for attr in ("score", "rank", "weight", "value_score", "desirability", "quality"):
+        assert not hasattr(MarketValidationPattern, attr)
+        assert not hasattr(a, attr)
+    # No member maps to a good/bad verdict.
+    assert {m.value for m in MarketValidationPattern}.isdisjoint(
+        {"GOOD", "BAD", "RED", "YELLOW", "GREEN", "PASS", "FAIL"}
+    )
+    assert a != b
