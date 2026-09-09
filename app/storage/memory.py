@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from app.domain.models import Candidate, EvidenceItem, EvidenceSnapshot
-from app.providers.base import KeywordDemandMetrics, MarketplaceListing
+from app.providers.base import KeywordDemandMetrics, MarketplaceListing, VideoObservation
 
 DEFAULT_CACHE_TTL = timedelta(days=7)
 
@@ -30,6 +30,7 @@ class ResearchStore:
         self._evidence_by_snapshot: dict[UUID, list[UUID]] = {}
         self._keyword_cache: dict[tuple[str, str, str, str], tuple[datetime, KeywordDemandMetrics]] = {}
         self._listing_cache: dict[tuple[str, str], tuple[datetime, list[MarketplaceListing]]] = {}
+        self._video_cache: dict[tuple[str, str], tuple[datetime, list[VideoObservation]]] = {}
         self._cache_ttl = cache_ttl
 
     # ------------------------------------------------------------- research runs
@@ -109,3 +110,17 @@ class ResearchStore:
         self, provider: str, query: str, listings: list[MarketplaceListing]
     ) -> None:
         self._listing_cache[(provider, query)] = (datetime.now(UTC), list(listings))
+
+    # ------------------------------------------------- public-content video cache
+
+    def cached_videos(self, provider: str, query: str) -> list[VideoObservation] | None:
+        entry = self._video_cache.get((provider, query))
+        if entry is None:
+            return None
+        stored_at, videos = entry
+        if datetime.now(UTC) - stored_at > self._cache_ttl:
+            return None
+        return list(videos)
+
+    def cache_videos(self, provider: str, query: str, videos: list[VideoObservation]) -> None:
+        self._video_cache[(provider, query)] = (datetime.now(UTC), list(videos))
