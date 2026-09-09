@@ -112,10 +112,84 @@ class SearchDemandProvider(ABC):
         raise NotImplementedError
 
 
+@dataclass(slots=True, frozen=True)
+class MarketplaceListing:
+    """Provider-agnostic public marketplace listing observation.
+
+    Every optional field is None unless the provider actually returned it —
+    absent data is never invented. Review counts and favorites are purchase
+    PROXIES only: they are never sales counts, units sold, or revenue. Exact
+    competitor sales/revenue are not public and stay UNKNOWN.
+    """
+
+    listing_id: str
+    title: str | None = None
+    url: str | None = None
+    price: float | None = None
+    currency: str | None = None
+    seller_id: str | None = None
+    rating: float | None = None
+    review_count: int | None = None
+    created_at: datetime | None = None
+    state: str | None = None
+    taxonomy: str | None = None
+    listing_type: str | None = None
+    is_digital: bool | None = None
+    retrieved_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class MarketplaceQueryResult:
+    """Result of one provider search pass for a single marketplace query."""
+
+    provider: str
+    query: str
+    listings: list[MarketplaceListing]
+    retrieved_at: datetime
+    collection_method: str
+    total_available: int | None = None
+    source_reference: str | None = None
+    provider_version: str | None = None
+    call_count: int = 0
+    cost: float | None = None
+    cost_is_estimate: bool = True
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
+class ListingReviewStats:
+    """Review statistics for one listing, as reported by the provider.
+
+    review_count is a purchase proxy, never a sales count.
+    """
+
+    listing_id: str
+    review_count: int | None
+    retrieved_at: datetime
+    call_count: int = 1
+
+
 class MarketplaceProvider(ABC):
+    """Batch marketplace research contract (mirrors SearchDemandProvider).
+
+    Implementations translate their own response shapes into
+    MarketplaceListing records; the domain layer never sees provider
+    payloads. Designed so Etsy can be joined by other marketplaces later.
+    """
+
+    name: str = "unknown"
+    collection_method: str = "official_api"
+    max_listings_per_query: int = 25
+    supports_review_stats: bool = False
+
     @abstractmethod
-    async def research(self, query: str, geography: str, language: str) -> ProviderEnvelope:
+    async def search_listings(self, query: str, limit: int) -> MarketplaceQueryResult:
+        """Search public listings for one normalized query."""
         raise NotImplementedError
+
+    async def fetch_review_stats(self, listing_id: str) -> ListingReviewStats:
+        """Fetch review stats for one listing. Optional capability."""
+        raise NotImplementedError(f"{self.name} does not support review stats")
 
 
 class PublicContentProvider(ABC):

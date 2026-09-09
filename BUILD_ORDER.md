@@ -20,11 +20,23 @@
 - Provider call/cost telemetry
 - Cache keys + freshness windows
 
-## Milestone 3 — Research orchestration
+## Milestone 3 — deliberately split into safer implementation slices
+The original Milestone 3 scope is preserved in full; it is only decomposed.
+
+### Milestone 3A — Etsy marketplace evidence (implemented)
+- Typed batch MarketplaceProvider contract
+- Etsy official API adapter (no scraping)
+- Purchase-proxy, price, and competition evidence + deterministic extractors
+- Query/result caps, caching, telemetry, partial-failure handling
+
+### Milestone 3B — YouTube public-content evidence
+- YouTube Data API adapter behind PublicContentProvider
+
+### Milestone 3C — Research orchestration
 - Preliminary research all candidates
-- Deep research top five
-- Evidence normalization
-- Ranking
+- Evidence → dimension bridge and normalization
+- Preliminary ranking
+- Top-five deep-research selection
 
 ## Milestone 4 — Product + pricing
 - Narrow product generator
