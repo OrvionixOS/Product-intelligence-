@@ -62,6 +62,10 @@ from app.services.preliminary_ranking import (
     rank_candidates,
 )
 from app.services.public_content import run_public_content_research
+from app.services.purchase_evidence import (
+    PurchaseEvidenceResult,
+    extract_purchase_evidence,
+)
 from app.services.search_demand import run_search_demand_research
 from app.storage.memory import ResearchStore
 
@@ -89,6 +93,14 @@ STATUS_PROVIDER_FAILED = "PROVIDER_FAILED"
 # library error, anything unforeseen. Kept distinct from PROVIDER_FAILED so
 # an operator can tell a handled provider failure from a defect.
 STATUS_UNEXPECTED_PROVIDER_ERROR = "UNEXPECTED_PROVIDER_ERROR"
+
+# A derivation is not a provider: it makes no calls and spends no quota, so
+# it reports its own outcome rather than borrowing a capability status that
+# would imply a provider was involved.
+DERIVATION_PURCHASE_EVIDENCE = "purchase_evidence"
+STATUS_DERIVATION_COMPLETE = "COMPLETE"
+STATUS_DERIVATION_NOT_REQUESTED = "NOT_REQUESTED"
+STATUS_DERIVATION_ERROR = "DERIVATION_ERROR"
 
 MISSING_CAPABILITY_NOT_REQUESTED = "capability_not_requested"
 MISSING_CAPABILITY_FAILED = "capability_provider_failed"
@@ -239,12 +251,36 @@ class CapabilityOutcome:
 
 
 @dataclass(slots=True)
+class DerivationOutcome:
+    """What one deterministic derivation over stored evidence achieved.
+
+    Derivations make no provider calls, so there is no provider, cost, or
+    quota to report — only whether the derivation ran, and why not if it
+    did not. `failure_reason` on an error carries the exception type, a
+    sanitized message, and a correlation id matching the server-side log.
+    """
+
+    derivation: str
+    status: str
+    candidates_covered: int = 0
+    failure_reason: str | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.status == STATUS_DERIVATION_COMPLETE
+
+
+@dataclass(slots=True)
 class PreliminaryResearchResult:
     research_run_id: UUID
     candidate_count: int
     capabilities: list[CapabilityOutcome]
     profiles: list[CandidatePreliminaryProfile]
     ranking: PreliminaryRanking
+    # Milestone 4A: Purchase Evidence derived for the selected candidates
+    # only, from evidence already collected. Empty when not derived.
+    purchase_evidence: dict[UUID, PurchaseEvidenceResult] = field(default_factory=dict)
+    derivations: list[DerivationOutcome] = field(default_factory=list)
     orchestration_version: str = ORCHESTRATION_VERSION
     dimensions_version: str = PRELIMINARY_DIMENSIONS_VERSION
     ranking_version: str = PRELIMINARY_RANKING_VERSION
@@ -375,6 +411,7 @@ async def run_preliminary_research(
     public_content_caps: CapabilityCaps | None = None,
     selection_size: int = DEEP_RESEARCH_SELECTION_SIZE,
     unavailable_capabilities: dict[str, str] | None = None,
+    derive_purchase_evidence: bool = True,
 ) -> PreliminaryResearchResult:
     """Coordinate every available evidence capability, then rank deterministically.
 
@@ -514,12 +551,72 @@ async def run_preliminary_research(
 
     ranking = rank_candidates(profiles, selection_size=selection_size)
 
+    # --- Milestone 4A: Purchase Evidence derivation -----------------------
+    #
+    # A pure derivation over evidence already collected: no provider calls,
+    # no quota, no second marketplace research system. It runs only for the
+    # selected candidates, since Purchase Evidence exists to inform the
+    # later deep-research stage.
+    #
+    # It inherits the capability boundary: a failure here degrades this
+    # derivation alone. Every dimension from 3C, and the ranking itself,
+    # survive intact, and nothing is fabricated or defaulted to zero.
+    purchase_evidence: dict[UUID, PurchaseEvidenceResult] = {}
+    derivations: list[DerivationOutcome] = []
+    if not derive_purchase_evidence:
+        derivations.append(
+            DerivationOutcome(
+                derivation=DERIVATION_PURCHASE_EVIDENCE,
+                status=STATUS_DERIVATION_NOT_REQUESTED,
+            )
+        )
+    else:
+        try:
+            for ranked in ranking.selected:
+                purchase_evidence[ranked.candidate_id] = extract_purchase_evidence(
+                    candidate_id=ranked.candidate_id,
+                    evidence=evidence[ranked.candidate_id],
+                )
+            derivations.append(
+                DerivationOutcome(
+                    derivation=DERIVATION_PURCHASE_EVIDENCE,
+                    status=STATUS_DERIVATION_COMPLETE,
+                    candidates_covered=len(purchase_evidence),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - deliberate derivation boundary
+            # Same contract as the capability boundary above: BaseException
+            # still propagates, the traceback goes to the server-side log,
+            # and only a sanitized message with a correlation id is exposed.
+            error_id = uuid4()
+            logger.exception(
+                "Unexpected error in %s derivation (error_id=%s)",
+                DERIVATION_PURCHASE_EVIDENCE,
+                error_id,
+            )
+            # Partial results are discarded rather than reported as if the
+            # derivation had completed for those candidates.
+            purchase_evidence = {}
+            derivations.append(
+                DerivationOutcome(
+                    derivation=DERIVATION_PURCHASE_EVIDENCE,
+                    status=STATUS_DERIVATION_ERROR,
+                    failure_reason=(
+                        f"{type(exc).__name__}: "
+                        f"{sanitize_error_message(safe_exception_message(exc))} "
+                        f"(error_id={error_id})"
+                    ),
+                )
+            )
+
     return PreliminaryResearchResult(
         research_run_id=run_id,
         candidate_count=len(candidates),
         capabilities=outcomes,
         profiles=profiles,
         ranking=ranking,
+        purchase_evidence=purchase_evidence,
+        derivations=derivations,
     )
 
 
