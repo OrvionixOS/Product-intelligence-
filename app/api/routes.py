@@ -36,8 +36,25 @@ from app.services.marketplace_features import (
     PriceSummary,
     PurchaseProxySummary,
 )
+from app.services.preliminary_dimensions import (
+    CandidatePreliminaryProfile,
+    PreliminaryDimension,
+)
+from app.services.preliminary_ranking import (
+    DEEP_RESEARCH_SELECTION_SIZE,
+    RankedCandidate,
+    explain_pairwise,
+)
 from app.services.public_content import run_public_content_research
 from app.services.public_content_features import ContentOutlier, PublicContentSummary
+from app.services.research_orchestration import (
+    CAPABILITY_MARKETPLACE,
+    CAPABILITY_PUBLIC_CONTENT,
+    CAPABILITY_SEARCH_DEMAND,
+    CapabilityCaps,
+    CapabilityOutcome,
+    run_preliminary_research,
+)
 from app.services.scoring import score_opportunity
 from app.services.search_demand import run_search_demand_research
 from app.services.search_demand_features import SearchDemandSummary
@@ -677,6 +694,253 @@ def get_public_content_snapshot(
     return SnapshotEvidenceResponse(
         snapshot=snapshot,
         evidence=store.evidence_for_snapshot(snapshot_id),
+    )
+
+
+class PreliminaryResearchRequest(BaseModel):
+    """Milestone 3C: research every candidate, then rank them preliminarily.
+
+    Each capability is opt-out: a capability whose provider is disabled or
+    whose credentials are missing is reported as unavailable rather than
+    failing the whole run.
+    """
+
+    candidates: list[Candidate] | None = None
+    research_run_id: UUID | None = None
+    location: str = Field(default="US", min_length=2, max_length=60)
+    language: str = Field(default="en", min_length=2, max_length=10)
+    search_demand_provider: str | None = "dataforseo"
+    marketplace: str | None = "etsy"
+    public_content_provider: str | None = "youtube"
+    selection_size: int = Field(default=DEEP_RESEARCH_SELECTION_SIZE, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "PreliminaryResearchRequest":
+        if (self.candidates is None) == (self.research_run_id is None):
+            raise ValueError("provide exactly one of 'candidates' or 'research_run_id'")
+        if self.candidates is not None and not self.candidates:
+            raise ValueError("'candidates' must not be empty")
+        return self
+
+
+class CapabilityOutcomeOut(BaseModel):
+    capability: str
+    status: str
+    provider: str | None
+    snapshot_id: UUID | None
+    provider_errors: list[str]
+    missing_query_count: int
+    provider_call_count: int
+    provider_cost: float | None
+    provider_cost_is_estimate: bool | None
+    quota_units_used: int | None
+    quota_units_is_exact: bool | None
+    cached_query_count: int
+    failure_reason: str | None
+
+    @classmethod
+    def from_outcome(cls, o: CapabilityOutcome) -> "CapabilityOutcomeOut":
+        return cls(
+            capability=o.capability,
+            status=o.status,
+            provider=o.provider,
+            snapshot_id=o.snapshot_id,
+            provider_errors=o.provider_errors,
+            missing_query_count=o.missing_query_count,
+            provider_call_count=o.provider_call_count,
+            provider_cost=o.provider_cost,
+            provider_cost_is_estimate=o.provider_cost_is_estimate,
+            quota_units_used=o.quota_units_used,
+            quota_units_is_exact=o.quota_units_is_exact,
+            cached_query_count=o.cached_query_count,
+            failure_reason=o.failure_reason,
+        )
+
+
+class PreliminaryDimensionOut(BaseModel):
+    """A preliminary dimension with its provenance and truth state intact."""
+
+    name: str
+    state: str
+    value: float | None
+    evidence_truth_basis: str | None
+    value_truth_class: str | None
+    formula_version: str
+    observed_input_count: int
+    unknown_input_count: int
+    duplicate_evidence_suppressed: int
+    contributing_evidence_ids: list[UUID]
+    providers: list[str]
+    source_references: list[str]
+    limitations: list[str]
+    missing_reason: str | None
+    bridge_version: str
+
+    @classmethod
+    def from_dimension(cls, d: PreliminaryDimension) -> "PreliminaryDimensionOut":
+        return cls(
+            name=d.name,
+            state=d.state.value,
+            value=d.value,
+            evidence_truth_basis=d.evidence_truth_basis.value if d.evidence_truth_basis else None,
+            value_truth_class=d.value_truth_class.value if d.value_truth_class else None,
+            formula_version=d.formula_version,
+            observed_input_count=d.observed_input_count,
+            unknown_input_count=d.unknown_input_count,
+            duplicate_evidence_suppressed=d.duplicate_evidence_suppressed,
+            contributing_evidence_ids=list(d.contributing_evidence_ids),
+            providers=list(d.providers),
+            source_references=list(d.source_references),
+            limitations=list(d.limitations),
+            missing_reason=d.missing_reason,
+            bridge_version=d.bridge_version,
+        )
+
+
+class CriterionValueOut(BaseModel):
+    name: str
+    value: float | str | None
+    direction: str
+
+
+class RankedCandidateOut(BaseModel):
+    candidate_id: UUID
+    candidate_title: str
+    rank: int
+    selected_for_deep_research: bool
+    criteria: list[CriterionValueOut]
+    dimensions: list[PreliminaryDimensionOut]
+    ranking_version: str
+
+    @classmethod
+    def from_ranked(cls, r: RankedCandidate) -> "RankedCandidateOut":
+        profile: CandidatePreliminaryProfile = r.profile
+        return cls(
+            candidate_id=r.candidate_id,
+            candidate_title=r.candidate_title,
+            rank=r.rank,
+            selected_for_deep_research=r.selected_for_deep_research,
+            criteria=[
+                CriterionValueOut(name=c.name, value=c.value, direction=c.direction)
+                for c in r.criteria
+            ],
+            dimensions=[
+                PreliminaryDimensionOut.from_dimension(profile.dimensions[name])
+                for name in sorted(profile.dimensions)
+            ],
+            ranking_version=r.ranking_version,
+        )
+
+
+class RankExplanationOut(BaseModel):
+    higher_candidate_id: UUID
+    lower_candidate_id: UUID
+    deciding_criterion: str
+    higher_value: str
+    lower_value: str
+    reason: str
+
+
+class PreliminaryResearchResponse(BaseModel):
+    research_run_id: UUID
+    candidate_count: int
+    capabilities: list[CapabilityOutcomeOut]
+    ranked: list[RankedCandidateOut]
+    selected_candidate_ids: list[UUID]
+    adjacent_rank_explanations: list[RankExplanationOut]
+    criteria_order: list[str]
+    orchestration_version: str
+    dimensions_version: str
+    ranking_version: str
+
+
+@router.post("/research/preliminary", response_model=PreliminaryResearchResponse)
+async def research_preliminary(
+    request: PreliminaryResearchRequest,
+    store: ResearchStore = Depends(get_research_store),
+) -> PreliminaryResearchResponse:
+    if request.candidates is not None:
+        candidates = request.candidates
+        research_run_id = None
+    else:
+        candidates_or_none = store.get_run_candidates(request.research_run_id)
+        if candidates_or_none is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"research run {request.research_run_id} not found",
+            )
+        candidates = candidates_or_none
+        research_run_id = request.research_run_id
+
+    # A capability whose provider cannot even be constructed (missing
+    # credentials) is reported as unavailable; it never fails the run.
+    unavailable: dict[str, str] = {}
+
+    def build(registry: dict, key: str | None, capability: str):
+        if key is None:
+            return None
+        provider_cls = registry.get(key)
+        if provider_cls is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"unknown {capability} provider '{key}'; available: {sorted(registry)}",
+            )
+        try:
+            return provider_cls()
+        except MissingCredentialsError as exc:
+            unavailable[capability] = f"{type(exc).__name__}: {exc}"
+            return None
+
+    search_provider = build(
+        SEARCH_DEMAND_PROVIDERS, request.search_demand_provider, CAPABILITY_SEARCH_DEMAND
+    )
+    marketplace_provider = build(
+        MARKETPLACE_PROVIDERS, request.marketplace, CAPABILITY_MARKETPLACE
+    )
+    content_provider = build(
+        PUBLIC_CONTENT_PROVIDERS, request.public_content_provider, CAPABILITY_PUBLIC_CONTENT
+    )
+
+    result = await run_preliminary_research(
+        candidates=candidates,
+        store=store,
+        search_demand_provider=search_provider,
+        marketplace_provider=marketplace_provider,
+        public_content_provider=content_provider,
+        research_run_id=research_run_id,
+        location=request.location,
+        language=request.language,
+        search_demand_caps=CapabilityCaps(),
+        marketplace_caps=CapabilityCaps(),
+        public_content_caps=CapabilityCaps(),
+        selection_size=request.selection_size,
+        unavailable_capabilities=unavailable,
+    )
+
+    ranked = result.ranking.ranked
+    explanations = [
+        RankExplanationOut(
+            higher_candidate_id=e.higher_candidate_id,
+            lower_candidate_id=e.lower_candidate_id,
+            deciding_criterion=e.deciding_criterion,
+            higher_value=e.higher_value,
+            lower_value=e.lower_value,
+            reason=e.reason,
+        )
+        for e in (explain_pairwise(a, b) for a, b in zip(ranked, ranked[1:]))
+    ]
+
+    return PreliminaryResearchResponse(
+        research_run_id=result.research_run_id,
+        candidate_count=result.candidate_count,
+        capabilities=[CapabilityOutcomeOut.from_outcome(o) for o in result.capabilities],
+        ranked=[RankedCandidateOut.from_ranked(r) for r in ranked],
+        selected_candidate_ids=result.selected_candidate_ids,
+        adjacent_rank_explanations=explanations,
+        criteria_order=list(result.ranking.criteria_order),
+        orchestration_version=result.orchestration_version,
+        dimensions_version=result.dimensions_version,
+        ranking_version=result.ranking_version,
     )
 
 
