@@ -7,7 +7,28 @@ class ProviderError(Exception):
     """Base class for research-provider failures.
 
     Messages must never contain credentials.
+
+    Adapters annotate failures with what the failed operation consumed so
+    callers can keep budgets honest:
+
+    - calls_consumed: HTTP requests the operation performed, the failed
+      attempt included (default 1).
+    - quota_units_consumed: quota units known to have been charged for the
+      operation, or None when that cannot be known (e.g. transport-level
+      failures) — callers should then budget conservatively and mark their
+      accounting as inexact rather than report zero.
     """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        calls_consumed: int = 1,
+        quota_units_consumed: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.calls_consumed = calls_consumed
+        self.quota_units_consumed = quota_units_consumed
 
 
 class MissingCredentialsError(ProviderError):
@@ -204,6 +225,9 @@ class VideoObservation:
     channel_subscriber_count: int | None = None
     channel_video_count: int | None = None
     channel_view_count: int | None = None
+    # When channel statistics were actually looked up; distinguishes
+    # "stats fetched but hidden (None)" from "never fetched".
+    channel_stats_retrieved_at: datetime | None = None
     url: str | None = None
     retrieved_at: datetime | None = None
 
@@ -258,7 +282,10 @@ class PublicContentProvider(ABC):
     max_videos_per_query: int = 10
     max_channels_per_stats_request: int = 50
     supports_channel_stats: bool = False
-    # Quota units one search_videos call consumes; used for budget planning.
+    # Call shape and quota one operation consumes; the service layer derives
+    # its budget checks from these instead of assuming a request pattern.
+    calls_per_search: int = 1
+    calls_per_channel_stats: int = 1
     quota_units_per_search: int = 0
     quota_units_per_channel_stats: int = 0
 

@@ -103,6 +103,8 @@ class FakeContentProvider(PublicContentProvider):
     name = "fake-content"
     collection_method = "official_api"
     supports_channel_stats = True
+    calls_per_search = 2
+    calls_per_channel_stats = 1
     quota_units_per_search = QUOTA_SEARCH + QUOTA_VIDEOS
     quota_units_per_channel_stats = QUOTA_CHANNELS
 
@@ -399,6 +401,10 @@ async def test_truth_classes_observed_inferred_unknown():
     engagement_v2 = by_key[("V2", "public_video_engagement_rate")]
     assert engagement_v2.truth_class == TruthClass.UNKNOWN
     assert engagement_v2.raw_value is None
+    # UNKNOWN records must not imply an inferred value exists.
+    assert not any("INFERRED" in lim for lim in engagement_v2.known_limitations)
+    assert any("not computable" in lim for lim in engagement_v2.known_limitations)
+    assert any("No inferred value exists" in lim for lim in engagement_v2.known_limitations)
 
 
 async def test_no_fabricated_metrics():
@@ -535,6 +541,106 @@ async def test_quota_budget_exhaustion_reported_not_guessed():
     assert result.snapshot.status == SnapshotStatus.PARTIAL
 
 
+async def test_failed_search_quota_accounted_not_zero():
+    """A failed request must not report zero consumption: exact amounts come
+    from the adapter's annotation; unknown amounts are budgeted at full cost
+    and flagged inexact."""
+    candidate = make_candidate(["bad", "good"])
+    provider = FakeContentProvider(
+        {"good": [video_for("V1")]},
+        fail_queries={"bad"},
+        # Plain error: no annotation -> consumption unknowable.
+        error=ProviderResponseError("simulated outage"),
+    )
+    store = ResearchStore()
+    result = await run_public_content_research(
+        [candidate], provider, store, max_channel_lookups=0
+    )
+    # Unknown failed-search quota is budgeted at the full search cost (101)
+    # on top of the successful search's exact 101.
+    assert result.quota_units_used == 202
+    assert result.quota_units_is_exact is False
+    assert result.snapshot.provider_call_count == 3  # 1 failed attempt + 2
+
+    # An adapter-annotated failure is accounted exactly and stays exact.
+    annotated = ProviderResponseError(
+        "http 500", calls_consumed=2, quota_units_consumed=101
+    )
+    provider2 = FakeContentProvider(
+        {"good": [video_for("V1")]}, fail_queries={"bad"}, error=annotated
+    )
+    store2 = ResearchStore()
+    result2 = await run_public_content_research(
+        [candidate], provider2, store2, max_channel_lookups=0
+    )
+    assert result2.quota_units_used == 202
+    assert result2.quota_units_is_exact is True
+    assert result2.snapshot.provider_call_count == 4  # 2 failed + 2 successful
+
+
+async def test_youtube_adapter_annotates_error_consumption(monkeypatch):
+    """The adapter reports what a failed pass consumed: a processed request
+    is charged its quota; a transport failure is honestly unknown."""
+
+    def videos_fail_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/search"):
+            return httpx.Response(
+                200, json={"items": [{"id": {"videoId": "vidX"}, "snippet": {}}]}
+            )
+        return httpx.Response(500, json={})
+
+    provider = make_youtube_provider(monkeypatch, videos_fail_handler)
+    with pytest.raises(ProviderResponseError) as videos_exc:
+        await provider.search_videos("q", limit=5)
+    assert videos_exc.value.calls_consumed == 2  # search succeeded, videos failed
+    assert videos_exc.value.quota_units_consumed == QUOTA_SEARCH + QUOTA_VIDEOS
+
+    provider = make_youtube_provider(monkeypatch, lambda r: httpx.Response(500, json={}))
+    with pytest.raises(ProviderResponseError) as search_exc:
+        await provider.search_videos("q", limit=5)
+    assert search_exc.value.calls_consumed == 1
+    assert search_exc.value.quota_units_consumed == QUOTA_SEARCH
+
+    def timeout_handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectTimeout("timed out")
+
+    provider = make_youtube_provider(monkeypatch, timeout_handler)
+    with pytest.raises(Exception) as timeout_exc:
+        await provider.search_videos("q", limit=5)
+    # Transport-level failure: quota consumption cannot be known.
+    assert timeout_exc.value.quota_units_consumed is None
+
+    channels_provider = make_youtube_provider(
+        monkeypatch, lambda r: httpx.Response(500, json={})
+    )
+    with pytest.raises(ProviderResponseError) as channels_exc:
+        await channels_provider.fetch_channel_stats(["UCabc"])
+    assert channels_exc.value.quota_units_consumed == QUOTA_CHANNELS
+
+
+async def test_hidden_subscriber_channels_not_refetched_from_cache():
+    """A channel whose stats were fetched but are hidden (all None) must not
+    be looked up again on a cached run."""
+    candidate = make_candidate(["q1"])
+    provider = FakeContentProvider(
+        {"q1": [video_for("V1", channel_id="chHidden")]},
+        channel_stats={
+            "chHidden": ChannelStats("chHidden", None, None, None, datetime.now(UTC))
+        },
+    )
+    store = ResearchStore()
+    first = await run_public_content_research([candidate], provider, store)
+    assert provider.channel_calls == [["chHidden"]]
+    second = await run_public_content_research([candidate], provider, store)
+    # Cached run: the hidden-stats lookup is NOT repeated.
+    assert provider.channel_calls == [["chHidden"]]
+    assert second.quota_units_used == 0
+    evidence = store.evidence_for_snapshot(second.snapshot.snapshot_id)
+    assert evidence[0].raw_payload["channel_subscriber_count"] is None
+    assert evidence[0].raw_payload["channel_stats_retrieved_at"] is not None
+    assert first.channel_stats_fetched == 1
+
+
 async def test_query_and_call_caps_enforced():
     candidate = make_candidate(["q1", "q2", "q3"])
     provider = FakeContentProvider({q: [video_for(f"V-{q}")] for q in ("q1", "q2", "q3")})
@@ -628,6 +734,7 @@ def test_endpoint_runs_public_content_research(monkeypatch):
     assert body["snapshot"]["status"] == "COMPLETE"
     assert body["unique_video_count"] == 3
     assert body["quota_units_used"] == 102
+    assert body["quota_units_is_exact"] is True
     summary = body["summaries"][0]
     assert summary["relevant_video_count"] == 3
     assert summary["median_views"] == 300.0

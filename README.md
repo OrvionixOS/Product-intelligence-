@@ -171,7 +171,12 @@ enabled; see `.env.example`). The default project quota is 10,000 units per
 day; this service enforces a per-request quota budget
 (`PUBLIC_CONTENT_MAX_QUOTA_UNITS`, default 1,000) and reports units used in
 every response. Queries beyond the budget are reported as
-`quota_budget_exhausted` — never silently dropped or guessed.
+`quota_budget_exhausted` — never silently dropped or guessed. Failed
+requests are accounted too: quota the API is known to have charged is added
+exactly, and when a failure makes exact consumption unknowable (e.g. a
+transport error) the full operation cost is budgeted conservatively and the
+response flags `quota_units_is_exact: false` — never zero merely because
+the request failed.
 
 ### Future controlled live YouTube smoke test (manual, spends real quota)
 

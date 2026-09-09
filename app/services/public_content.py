@@ -59,6 +59,12 @@ ENGAGEMENT_LIMITATIONS = [
     "Engagement is content-interaction interest, never purchase intent or sales.",
 ]
 
+ENGAGEMENT_UNKNOWN_LIMITATIONS = [
+    "Engagement rate is not computable: like or view count was not publicly available.",
+    "No inferred value exists; UNKNOWN is reported instead of a guess.",
+    "Engagement is content-interaction interest, never purchase intent or sales.",
+]
+
 CONTENT_LIMITATIONS = [
     "Public metadata observation for content-pattern research; presence is not performance validation.",
     "Search-ranked results are a provider-ordered sample, not the full content field.",
@@ -140,6 +146,9 @@ class PublicContentRunResult:
     cached_query_count: int = 0
     unique_video_count: int = 0
     quota_units_used: int = 0
+    # False when a failure made exact quota consumption unknowable; the
+    # total then includes conservative full-cost estimates for those calls.
+    quota_units_is_exact: bool = True
     channel_stats_fetched: int = 0
     channel_stats_skipped: int = 0
 
@@ -202,8 +211,7 @@ def build_video_evidence(
         unit="likes_per_view" if rate is not None else None,
         known_limitations=list(ENGAGEMENT_LIMITATIONS)
         if rate is not None
-        else list(ENGAGEMENT_LIMITATIONS)
-        + ["Not computable: like or view count was not publicly available."],
+        else list(ENGAGEMENT_UNKNOWN_LIMITATIONS),
         **common,
     )
 
@@ -287,10 +295,11 @@ async def run_public_content_research(
     source_reference: str | None = None
     fetched_queries: list[str] = []
 
+    quota_is_exact = True
     for query in to_fetch:
-        # A search pass costs multiple HTTP calls and a known quota amount;
+        # A search pass costs the provider-declared call shape and quota;
         # never start one that would exceed either budget.
-        if call_count + 2 > call_budget:
+        if call_count + provider.calls_per_search > call_budget:
             missing.append(MissingQuery(query, MISSING_BUDGET, plan.query_to_candidates[query]))
             continue
         if quota_used + provider.quota_units_per_search > quota_budget:
@@ -299,7 +308,16 @@ async def run_public_content_research(
         try:
             result = await provider.search_videos(query, limit=videos_cap)
         except ProviderError as exc:
-            call_count += 1  # the failed attempt still consumed a request
+            # Honest accounting for the failed attempt: use what the adapter
+            # reports it consumed; when exact quota consumption cannot be
+            # known, budget the full search cost and flag the total inexact
+            # rather than reporting zero.
+            call_count += exc.calls_consumed
+            if exc.quota_units_consumed is not None:
+                quota_used += exc.quota_units_consumed
+            else:
+                quota_used += provider.quota_units_per_search
+                quota_is_exact = False
             provider_errors.append(f"{type(exc).__name__}: {exc}")
             missing.append(
                 MissingQuery(query, MISSING_PROVIDER_ERROR, plan.query_to_candidates[query])
@@ -340,7 +358,9 @@ async def run_public_content_research(
         pending_channels: list[str] = []
         for video_id in video_order:
             video = canonical[video_id]
-            if video.channel_id is None or video.channel_subscriber_count is not None:
+            # channel_stats_retrieved_at marks a real lookup, so a channel
+            # whose stats are hidden (all None) is not re-fetched from cache.
+            if video.channel_id is None or video.channel_stats_retrieved_at is not None:
                 continue
             if video.channel_id not in pending_channels:
                 pending_channels.append(video.channel_id)
@@ -355,19 +375,25 @@ async def run_public_content_research(
         for batch in batches:
             if (
                 lookups >= channel_lookup_budget
-                or call_count + 1 > call_budget
+                or call_count + provider.calls_per_channel_stats > call_budget
                 or quota_used + provider.quota_units_per_channel_stats > quota_budget
             ):
                 channels_skipped += len(batch)
                 continue
             lookups += 1
-            call_count += 1
             try:
                 stats_result = await provider.fetch_channel_stats(batch)
             except ProviderError as exc:
+                call_count += exc.calls_consumed
+                if exc.quota_units_consumed is not None:
+                    quota_used += exc.quota_units_consumed
+                else:
+                    quota_used += provider.quota_units_per_channel_stats
+                    quota_is_exact = False
                 provider_errors.append(f"{type(exc).__name__}: {exc}")
                 channels_skipped += len(batch)
                 continue
+            call_count += stats_result.call_count
             quota_used += stats_result.quota_units
             provider_errors.extend(stats_result.errors)
             stats_by_channel.update(stats_result.stats)
@@ -383,6 +409,7 @@ async def run_public_content_research(
                         channel_subscriber_count=stats.subscriber_count,
                         channel_video_count=stats.video_count,
                         channel_view_count=stats.view_count,
+                        channel_stats_retrieved_at=stats.retrieved_at,
                     )
 
     # Cache final (enriched) videos per fetched query so a later run within
@@ -450,6 +477,7 @@ async def run_public_content_research(
         cached_query_count=cached_count,
         unique_video_count=len(canonical),
         quota_units_used=quota_used,
+        quota_units_is_exact=quota_is_exact,
         channel_stats_fetched=channels_fetched,
         channel_stats_skipped=channels_skipped,
     )

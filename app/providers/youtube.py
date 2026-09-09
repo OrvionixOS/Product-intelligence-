@@ -29,6 +29,7 @@ from app.providers.base import (
     ChannelStatsResult,
     MissingCredentialsError,
     ProviderAuthError,
+    ProviderError,
     ProviderRateLimitError,
     ProviderResponseError,
     ProviderTimeoutError,
@@ -140,6 +141,8 @@ class YouTubeContentProvider(PublicContentProvider):
     name = "youtube"
     collection_method = "official_api"
     supports_channel_stats = True
+    calls_per_search = 2  # /search + /videos
+    calls_per_channel_stats = 1
     quota_units_per_search = QUOTA_SEARCH + QUOTA_VIDEOS  # search + stats batch
     quota_units_per_channel_stats = QUOTA_CHANNELS
 
@@ -161,7 +164,11 @@ class YouTubeContentProvider(PublicContentProvider):
     def __repr__(self) -> str:  # never expose the API key
         return f"YouTubeContentProvider(base_url={self._base_url!r})"
 
-    async def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _get(self, path: str, params: dict[str, Any], quota_units: int) -> dict[str, Any]:
+        """One API GET. Errors are annotated with what the attempt consumed:
+        a request YouTube processed (any HTTP status) is assumed charged its
+        quota_units; a transport-level failure may never have reached the
+        API, so its quota consumption is honestly unknown (None)."""
         request_params = dict(params)
         request_params["key"] = self._api_key
         try:
@@ -175,13 +182,21 @@ class YouTubeContentProvider(PublicContentProvider):
             # Never include the URL: it carries the API key as a parameter.
             raise ProviderResponseError(f"YouTube transport error: {type(exc).__name__}") from exc
 
-        self._raise_for_status(response)
         try:
+            self._raise_for_status(response)
             body = response.json()
+        except ProviderError as exc:
+            exc.quota_units_consumed = quota_units
+            raise
         except ValueError as exc:
-            raise ProviderResponseError("YouTube returned a non-JSON response") from exc
+            raise ProviderResponseError(
+                "YouTube returned a non-JSON response", quota_units_consumed=quota_units
+            ) from exc
         if not isinstance(body, dict):
-            raise ProviderResponseError("YouTube returned an unexpected response shape")
+            raise ProviderResponseError(
+                "YouTube returned an unexpected response shape",
+                quota_units_consumed=quota_units,
+            )
         return body
 
     @staticmethod
@@ -220,6 +235,7 @@ class YouTubeContentProvider(PublicContentProvider):
         search_body = await self._get(
             SEARCH_PATH,
             params={"part": "snippet", "q": query, "type": "video", "maxResults": page_limit},
+            quota_units=QUOTA_SEARCH,
         )
         errors: list[str] = []
         items = search_body.get("items")
@@ -244,14 +260,22 @@ class YouTubeContentProvider(PublicContentProvider):
         call_count = 1
         quota_units = QUOTA_SEARCH
         if video_ids:
-            videos_body = await self._get(
-                VIDEOS_PATH,
-                params={
-                    "part": "snippet,statistics,contentDetails",
-                    "id": ",".join(video_ids),
-                    "maxResults": len(video_ids),
-                },
-            )
+            try:
+                videos_body = await self._get(
+                    VIDEOS_PATH,
+                    params={
+                        "part": "snippet,statistics,contentDetails",
+                        "id": ",".join(video_ids),
+                        "maxResults": len(video_ids),
+                    },
+                    quota_units=QUOTA_VIDEOS,
+                )
+            except ProviderError as exc:
+                # The successful /search call before this failure was charged.
+                exc.calls_consumed = 2
+                if exc.quota_units_consumed is not None:
+                    exc.quota_units_consumed += QUOTA_SEARCH
+                raise
             call_count += 1
             quota_units += QUOTA_VIDEOS
             retrieved_at = datetime.now(UTC)
@@ -299,6 +323,7 @@ class YouTubeContentProvider(PublicContentProvider):
                 "id": ",".join(channel_ids),
                 "maxResults": len(channel_ids),
             },
+            quota_units=QUOTA_CHANNELS,
         )
         retrieved_at = datetime.now(UTC)
         stats: dict[str, ChannelStats] = {}

@@ -393,6 +393,7 @@ class PublicContentResearchResponse(BaseModel):
     cached_query_count: int
     unique_video_count: int
     quota_units_used: int
+    quota_units_is_exact: bool
     channel_stats_fetched: int
     channel_stats_skipped: int
 
@@ -656,6 +657,7 @@ async def research_public_content(
         cached_query_count=result.cached_query_count,
         unique_video_count=result.unique_video_count,
         quota_units_used=result.quota_units_used,
+        quota_units_is_exact=result.quota_units_is_exact,
         channel_stats_fetched=result.channel_stats_fetched,
         channel_stats_skipped=result.channel_stats_skipped,
     )

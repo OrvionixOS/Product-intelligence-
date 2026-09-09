@@ -143,6 +143,7 @@ create table if not exists public_content_video_observations (
   channel_subscriber_count bigint,
   channel_video_count bigint,
   channel_view_count bigint,
+  channel_stats_retrieved_at timestamptz,
   url text,
   retrieved_at timestamptz not null,
   raw_payload_hash text not null,
