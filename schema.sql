@@ -94,6 +94,31 @@ create table if not exists evidence_items (
   created_at timestamptz not null default now()
 );
 
+-- Canonical marketplace listing observations (Milestone 3A). One row per
+-- (provider, listing, retrieval): the deduped observation that per-candidate
+-- evidence_items reference via raw_payload_hash. Review counts are purchase
+-- PROXIES; exact sales/revenue are never stored because they are never known.
+create table if not exists marketplace_listing_observations (
+  id uuid primary key default gen_random_uuid(),
+  provider text not null,
+  listing_id text not null,
+  title text,
+  url text,
+  price numeric(12,2),
+  currency text,
+  seller_id text,
+  rating numeric(3,2),
+  review_count integer,
+  listing_created_at timestamptz,
+  state text,
+  taxonomy text,
+  listing_type text,
+  is_digital boolean,
+  retrieved_at timestamptz not null,
+  raw_payload_hash text not null,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists score_versions (
   id uuid primary key default gen_random_uuid(),
   opportunity_id uuid not null references opportunities(id) on delete cascade,
@@ -117,3 +142,4 @@ create index if not exists idx_evidence_snapshot on evidence_items(snapshot_id);
 create index if not exists idx_snapshots_research_run on evidence_snapshots(research_run_id);
 create index if not exists idx_evidence_provider_collected on evidence_items(provider, collected_at desc);
 create index if not exists idx_scores_opportunity_calculated on score_versions(opportunity_id, calculated_at desc);
+create index if not exists idx_marketplace_obs_provider_listing on marketplace_listing_observations(provider, listing_id, retrieved_at desc);
