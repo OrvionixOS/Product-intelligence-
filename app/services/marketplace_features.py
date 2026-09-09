@@ -144,7 +144,11 @@ def summarize_purchase_proxy(
 def summarize_price(candidate_id: UUID, listings: list[MarketplaceListing]) -> PriceSummary:
     priced = [listing for listing in listings if listing.price is not None and listing.price > 0]
     missing = sum(1 for listing in listings if listing.price is None)
-    currencies = sorted({listing.currency for listing in priced if listing.currency is not None})
+    # A price whose currency was not returned has no comparable unit: it is
+    # excluded from statistics and counted as missing data, never mixed in.
+    missing += sum(1 for listing in priced if listing.currency is None)
+    priced = [listing for listing in priced if listing.currency is not None]
+    currencies = sorted({listing.currency for listing in priced})
     primary_currency = currencies[0] if len(currencies) == 1 else None
 
     # Mixed currencies are not silently averaged: statistics are computed only

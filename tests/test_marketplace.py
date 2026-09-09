@@ -391,6 +391,28 @@ def test_insufficient_pricing_evidence_is_flagged():
     assert empty.median_price is None
 
 
+def test_price_without_currency_excluded_from_stats():
+    """A price whose currency Etsy did not return has no comparable unit; it
+    must never mix into another currency's statistics."""
+    cid = uuid4()
+    listings = [
+        listing_for("L1", price=10.0, currency="USD"),
+        listing_for("L2", price=12.0, currency="USD"),
+        listing_for("L3", price=900.0, currency=None),  # unknown unit
+    ]
+    summary = summarize_price(cid, listings)
+    assert summary.relevant_paid_comparable_count == 2
+    assert summary.max_price == 12.0  # the unknown-unit 900.0 never mixes in
+    assert summary.currency == "USD"
+    assert summary.mixed_currencies is False
+    assert summary.missing_price_data_count == 1
+    # All prices of unknown currency -> no comparables, insufficient evidence.
+    only_unknown = summarize_price(cid, [listing_for("L4", price=5.0, currency=None)])
+    assert only_unknown.relevant_paid_comparable_count == 0
+    assert only_unknown.insufficient_evidence is True
+    assert only_unknown.median_price is None
+
+
 def test_mixed_currencies_not_averaged_together():
     cid = uuid4()
     listings = [
