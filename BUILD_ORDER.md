@@ -48,7 +48,23 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - Explicitly NOT final POS/ECS: no weights, no thresholds, no
   RED/YELLOW/GREEN in this slice
 
-## Milestone 4 — Product + pricing
+## Milestone 4 — deliberately split into safer implementation slices
+
+### Milestone 4A — Purchase evidence (implemented)
+- Deterministic Purchase Evidence extractor over evidence already collected
+  by 3A/3C — no new provider calls, no second marketplace research system
+- Public purchase PROXIES only (review counts, review presence, listing
+  longevity, paid comparables, seller breadth). Never sales, never revenue
+- Direct/authorized transactional evidence interface reserved but NOT
+  implemented: no seller OAuth, no connected-store transactions
+- `market_validation_pattern_v1`: describes the SHAPE of proxy evidence
+  (absent / unknown / weak / concentrated / multiple-sellers /
+  distributed), explicitly not a ranking of desirability
+- No 0-100 score: no purchase-evidence formula is approved, so the
+  dimension returns EVIDENCE_PRESENT_UNSCORED rather than inventing one
+- Inherits the 3C failure boundary as a derivation outcome
+
+### Milestone 4B — Product + pricing (not started)
 - Narrow product generator
 - Comparable price bands
 - Buyer reach

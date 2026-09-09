@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -45,6 +46,11 @@ from app.services.preliminary_ranking import (
 )
 from app.services.public_content import run_public_content_research
 from app.services.public_content_features import ContentOutlier, PublicContentSummary
+from app.services.purchase_evidence import (
+    PurchaseEvidenceFeatures,
+    PurchaseEvidenceProvenance,
+    PurchaseEvidenceResult,
+)
 from app.services.research_orchestration import (
     CAPABILITY_MARKETPLACE,
     CAPABILITY_PUBLIC_CONTENT,
@@ -52,6 +58,7 @@ from app.services.research_orchestration import (
     STATUS_UNEXPECTED_PROVIDER_ERROR,
     CapabilityCaps,
     CapabilityOutcome,
+    DerivationOutcome,
     run_preliminary_research,
 )
 from app.services.search_demand import run_search_demand_research
@@ -853,6 +860,167 @@ class RankExplanationOut(BaseModel):
     reason: str
 
 
+class PurchaseEvidenceFeaturesOut(BaseModel):
+    """Deterministic purchase-PROXY features. None of these is a sales figure."""
+
+    relevant_comparable_count: int
+    paid_comparable_count: int
+    distinct_seller_count: int
+    excluded_physical_listing_count: int
+    unknown_format_listing_count: int
+    listings_with_observed_review_count: int
+    listings_with_unknown_review_count: int
+    listings_with_observed_zero_reviews: int
+    listings_with_proxy_evidence: int
+    proportion_of_comparables_with_proxy: float | None
+    median_review_count: float | None
+    upper_quartile_review_count: float | None
+    max_review_count: int | None
+    winsorized_mean_review_count: float | None
+    sellers_with_proxy_evidence: int
+    # Share of OBSERVED REVIEW COUNTS held by the largest seller. This is
+    # not market share, not revenue share, and not a unit count.
+    top_seller_proxy_share: float | None
+    listings_with_creation_date: int
+    listing_age_days_median: float | None
+    established_listing_count: int
+    established_seller_count: int
+    currencies_observed: list[str]
+    mixed_currencies: bool
+    features_version: str
+
+    @classmethod
+    def from_features(cls, f: PurchaseEvidenceFeatures) -> "PurchaseEvidenceFeaturesOut":
+        return cls(
+            relevant_comparable_count=f.relevant_comparable_count,
+            paid_comparable_count=f.paid_comparable_count,
+            distinct_seller_count=f.distinct_seller_count,
+            excluded_physical_listing_count=f.excluded_physical_listing_count,
+            unknown_format_listing_count=f.unknown_format_listing_count,
+            listings_with_observed_review_count=f.listings_with_observed_review_count,
+            listings_with_unknown_review_count=f.listings_with_unknown_review_count,
+            listings_with_observed_zero_reviews=f.listings_with_observed_zero_reviews,
+            listings_with_proxy_evidence=f.listings_with_proxy_evidence,
+            proportion_of_comparables_with_proxy=f.proportion_of_comparables_with_proxy,
+            median_review_count=f.median_review_count,
+            upper_quartile_review_count=f.upper_quartile_review_count,
+            max_review_count=f.max_review_count,
+            winsorized_mean_review_count=f.winsorized_mean_review_count,
+            sellers_with_proxy_evidence=f.sellers_with_proxy_evidence,
+            top_seller_proxy_share=f.top_seller_proxy_share,
+            listings_with_creation_date=f.listings_with_creation_date,
+            listing_age_days_median=f.listing_age_days_median,
+            established_listing_count=f.established_listing_count,
+            established_seller_count=f.established_seller_count,
+            currencies_observed=list(f.currencies_observed),
+            mixed_currencies=f.mixed_currencies,
+            features_version=f.features_version,
+        )
+
+
+class PurchaseEvidenceProvenanceOut(BaseModel):
+    evidence_ids: list[UUID]
+    listing_ids: list[str]
+    providers: list[str]
+    marketplaces: list[str]
+    source_references: list[str]
+    source_truth_classes: list[str]
+    source_purposes: list[str]
+    earliest_retrieved_at: datetime | None
+    latest_retrieved_at: datetime | None
+    duplicate_evidence_suppressed: int
+
+    @classmethod
+    def from_provenance(
+        cls, p: PurchaseEvidenceProvenance
+    ) -> "PurchaseEvidenceProvenanceOut":
+        return cls(
+            evidence_ids=list(p.evidence_ids),
+            listing_ids=list(p.listing_ids),
+            providers=list(p.providers),
+            marketplaces=list(p.marketplaces),
+            source_references=list(p.source_references),
+            source_truth_classes=list(p.source_truth_classes),
+            source_purposes=list(p.source_purposes),
+            earliest_retrieved_at=p.earliest_retrieved_at,
+            latest_retrieved_at=p.latest_retrieved_at,
+            duplicate_evidence_suppressed=p.duplicate_evidence_suppressed,
+        )
+
+
+class PurchaseEvidenceOut(BaseModel):
+    """Purchase Evidence for one candidate (Milestone 4A).
+
+    `value` is always null: no purchase-evidence formula is approved, so no
+    0-100 score is produced. `exact_units_sold` and `exact_revenue` are
+    always UNKNOWN — that data is not public and is never estimated.
+    """
+
+    candidate_id: UUID
+    state: str
+    value: float | None
+    pattern: str
+    source: str
+    value_truth_class: str | None
+    features_truth_class: str | None
+    evidence_truth_basis: str | None
+    exact_units_sold: str
+    exact_revenue: str
+    direct_authorized_evidence_available: bool
+    missing_reason: str | None
+    features: PurchaseEvidenceFeaturesOut | None
+    provenance: PurchaseEvidenceProvenanceOut
+    limitations: list[str]
+    dimension_name: str
+    version: str
+    pattern_version: str
+
+    @classmethod
+    def from_result(cls, r: PurchaseEvidenceResult) -> "PurchaseEvidenceOut":
+        return cls(
+            candidate_id=r.candidate_id,
+            state=r.state.value,
+            value=r.value,
+            pattern=r.pattern.value,
+            source=r.source.value,
+            value_truth_class=r.value_truth_class.value if r.value_truth_class else None,
+            features_truth_class=(
+                r.features_truth_class.value if r.features_truth_class else None
+            ),
+            evidence_truth_basis=(
+                r.evidence_truth_basis.value if r.evidence_truth_basis else None
+            ),
+            exact_units_sold=r.exact_units_sold.value,
+            exact_revenue=r.exact_revenue.value,
+            direct_authorized_evidence_available=r.direct_authorized_evidence_available,
+            missing_reason=r.missing_reason,
+            features=(
+                PurchaseEvidenceFeaturesOut.from_features(r.features) if r.features else None
+            ),
+            provenance=PurchaseEvidenceProvenanceOut.from_provenance(r.provenance),
+            limitations=list(r.limitations),
+            dimension_name=r.dimension_name,
+            version=r.version,
+            pattern_version=r.pattern_version,
+        )
+
+
+class DerivationOutcomeOut(BaseModel):
+    derivation: str
+    status: str
+    candidates_covered: int
+    failure_reason: str | None
+
+    @classmethod
+    def from_outcome(cls, o: DerivationOutcome) -> "DerivationOutcomeOut":
+        return cls(
+            derivation=o.derivation,
+            status=o.status,
+            candidates_covered=o.candidates_covered,
+            failure_reason=o.failure_reason,
+        )
+
+
 class PreliminaryResearchResponse(BaseModel):
     research_run_id: UUID
     candidate_count: int
@@ -861,6 +1029,9 @@ class PreliminaryResearchResponse(BaseModel):
     selected_candidate_ids: list[UUID]
     adjacent_rank_explanations: list[RankExplanationOut]
     criteria_order: list[str]
+    # Milestone 4A: derived for the selected candidates only.
+    purchase_evidence: list[PurchaseEvidenceOut]
+    derivations: list[DerivationOutcomeOut]
     orchestration_version: str
     dimensions_version: str
     ranking_version: str
@@ -950,6 +1121,12 @@ async def research_preliminary(
         selected_candidate_ids=result.selected_candidate_ids,
         adjacent_rank_explanations=explanations,
         criteria_order=list(result.ranking.criteria_order),
+        purchase_evidence=[
+            PurchaseEvidenceOut.from_result(result.purchase_evidence[r.candidate_id])
+            for r in ranked
+            if r.candidate_id in result.purchase_evidence
+        ],
+        derivations=[DerivationOutcomeOut.from_outcome(d) for d in result.derivations],
         orchestration_version=result.orchestration_version,
         dimensions_version=result.dimensions_version,
         ranking_version=result.ranking_version,

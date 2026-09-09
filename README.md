@@ -367,6 +367,146 @@ Copy `.env.example` and fill in real values (never commit them):
 - `PUBLIC_CONTENT_MAX_QUOTA_UNITS` — quota units spent per request (default 1000)
 - `PUBLIC_CONTENT_MAX_CHANNEL_LOOKUPS` — batched channel-stats calls per request (default 2; 0 disables)
 
+Milestone 4A (purchase evidence) is implemented:
+
+- A deterministic Purchase Evidence extractor
+  (`app/services/purchase_evidence.py`, `purchase_evidence_v1`) that derives
+  purchase-proxy features from marketplace evidence **already collected** by
+  3A and resolved by 3C. It makes no provider calls, spends no quota, and
+  does not duplicate the 3A marketplace pipeline
+- Derived for the selected (top-five) candidates and returned by
+  `POST /research/preliminary` under `purchase_evidence`. No new endpoint
+- Runs behind the 3C failure boundary as a `DerivationOutcome`: if the
+  derivation fails, every other dimension and the ranking survive, the
+  failure is explicit, and nothing is fabricated or zero-filled
+
+#### What Purchase Evidence means
+
+It answers one question: **what evidence exists that buyers actually spend
+money on this type of product?**
+
+It deliberately does not answer how many units a competitor sold, what a
+competitor's revenue is, whether this product will sell, or the probability
+of success. None of that is derivable from public marketplace data.
+
+#### Direct evidence vs. public proxies
+
+| Tier | Meaning | Status in 4A |
+| --- | --- | --- |
+| DIRECT / OBSERVED | Authorized transactional data for a seller: orders, receipts, transactions, refunds, revenue | **Not implemented.** Requires seller authorization this repository has no approved infrastructure for. The `PurchaseEvidenceSource.DIRECT_AUTHORIZED` interface is reserved only |
+| PUBLIC PROXY | Review counts, review presence, listing longevity, paid comparables, distinct sellers, established products in the same problem/format area | What 4A actually uses |
+
+#### Why review counts are proxies and never sales
+
+A review count is one step removed from a purchase. Not every purchase
+produces a review, review timing lags purchases, and the ratio between
+reviews and purchases is unknown and is not estimated anywhere. These
+conversions are forbidden and appear nowhere in the codebase:
+
+```
+review_count          ->  sales           FORBIDDEN
+reviews               ->  revenue         FORBIDDEN
+listing presence      ->  purchase count  FORBIDDEN
+price x review_count  ->  revenue         FORBIDDEN
+```
+
+**Exact competitor sales and revenue are not public and remain UNKNOWN.**
+Every Purchase Evidence result carries `exact_units_sold: UNKNOWN` and
+`exact_revenue: UNKNOWN` as permanent, typed markers — they are TruthClass
+fields and cannot hold a number.
+
+#### Dimension states
+
+The same four states 3C uses, and none is ever rewritten as zero:
+
+- `MISSING` — no comparables were collected, or all were excluded as an
+  unrelated (physical) format
+- `UNKNOWN` — comparables were observed but no review count was measured for
+  any of them. An absence of measurement, not an absence of purchases
+- `EVIDENCE_PRESENT_UNSCORED` — real proxy features exist, **including the
+  case where every observed review count is zero**, which is a measured
+  absence and is distinct from UNKNOWN
+- `SCORED` — reserved. 4A never produces it
+
+#### No numeric score (deliberate)
+
+**4A intentionally withholds a 0-100 value.** No purchase-evidence formula
+is approved in this repository, and 3A/3C both declined to invent one for
+marketplace evidence. Manufacturing a "sales score" from proxies would be a
+fabrication, so the extractor returns the structured feature vector and
+`EVIDENCE_PRESENT_UNSCORED` instead. `DimensionState.SCORED` stays available
+for when a formula is specified and approved.
+
+#### Market-validation pattern (`market_validation_pattern_v1`)
+
+Describes the **shape** of proxy evidence, not its desirability. These are
+deliberately not ranked — DISTRIBUTED is not "better" than CONCENTRATED:
+
+| Pattern | Meaning |
+| --- | --- |
+| `NO_COMPARABLES` | Nothing observed |
+| `UNKNOWN_PROXY` | Comparables exist, review counts unmeasured |
+| `NO_PUBLIC_PROXY` | Review counts measured, all zero |
+| `WEAK_PROXY` | Proxy evidence on very few listings or one seller |
+| `CONCENTRATED` | Proxy volume dominated by a single seller |
+| `MULTIPLE_SELLERS` | Several sellers carry proxy evidence, none dominant. Does **not** claim they are established — the classifier never checks listing age; `established_listing_count` reports that separately |
+| `DISTRIBUTED` | Proxy evidence spans many distinct sellers |
+
+`top_seller_proxy_share` is the share of **observed review counts** held by
+the largest seller. It is **not market share, not revenue share, and not a
+unit count**, and listings with no seller id are excluded from it rather
+than merged into a fictional single seller.
+
+#### Robust statistics
+
+Marketplace review distributions are heavily skewed — one long-running
+bestseller can hold more reviews than everything else combined. Arithmetic
+means are avoided throughout. The extractor reports medians, quartiles, a
+winsorized mean (capped at the 90th percentile), and robust counts, so one
+extreme incumbent cannot dominate the dimension.
+
+The winsorized mean is **withheld (null) below five observed review
+counts**. With four values the 90th percentile sits beside the maximum, so
+winsorizing would not deliver the robustness it implies and the number would
+misrepresent itself as typical. Medians and quartiles, which are robust at
+any sample size, are still reported.
+
+#### V1 assumptions and thresholds
+
+Every threshold below is an unvalidated **V1 assumption**, versioned by
+`market_validation_pattern_v1`, appearing in no approved specification:
+
+| Threshold | Value | Basis | Affects |
+| --- | --- | --- | --- |
+| `MIN_REVIEWS_FOR_PROXY` | 1 | **Definitional.** "At least one review exists" is the boundary between some evidence and none; any higher value would be pure judgment | pattern + counts |
+| `MIN_SELLERS_FOR_MULTIPLE` | 2 | **Definitional.** "Multiple" cannot mean fewer than two | pattern |
+| `ESTABLISHED_LISTING_MIN_AGE_DAYS` | 180 | **Unvalidated heuristic** | two reported counts only — not the pattern |
+| `MIN_SELLERS_FOR_DISTRIBUTED` | 4 | **Unvalidated heuristic.** 3 or 5 would be equally defensible | pattern |
+| `CONCENTRATION_DOMINANCE_THRESHOLD` | 0.6 | **Unvalidated heuristic.** No external benchmark is claimed | pattern |
+| `WEAK_PROXY_MAX_LISTINGS` | 2 | **Unvalidated heuristic** | pattern |
+
+Two of the six are definitional rather than arbitrary; the other four are
+judgment calls that could reasonably be set differently. None is supported
+by any approved specification, none has been validated against outcome data,
+and no external benchmark is claimed for any of them. Changing any value is
+a change to `market_validation_pattern_v1` and should be versioned as one.
+
+#### Known limitations
+
+- Purchase evidence describes a product **type** and a market, never a
+  specific future product. It is not proof that a new product will sell and
+  carries no probability of success.
+- Marketplace search results are a provider-ordered sample, not the full
+  market, so absence of comparables is weak evidence of absence.
+- Physical listings are excluded from a digital product's comparables. A
+  listing whose `is_digital` the marketplace did not report is kept and
+  counted as unknown-relevance rather than silently dropped.
+- Currencies are recorded for transparency only; review counts are
+  currency-independent, so a mixed-currency market cannot alter any
+  purchase-proxy statistic.
+- Listing longevity depends on creation dates the marketplace may not
+  return; listings without one are counted, never assigned an assumed age.
+
 ### Known technical debt
 
 - **Unbounded in-memory research store.** `ResearchStore` is a process-wide,
