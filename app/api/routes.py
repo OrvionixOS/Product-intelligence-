@@ -10,8 +10,13 @@ from app.domain.models import (
     ScoreDimensions,
     ScoreResult,
 )
-from app.providers.base import MissingCredentialsError, SearchDemandProvider
+from app.providers.base import (
+    MarketplaceProvider,
+    MissingCredentialsError,
+    SearchDemandProvider,
+)
 from app.providers.dataforseo import DataForSeoSearchDemandProvider
+from app.providers.etsy import EtsyMarketplaceProvider
 from app.providers.llm import (
     CandidateGenerationError,
     CandidateGenerationProvider,
@@ -22,6 +27,12 @@ from app.services.candidate_discovery import (
     InvalidSeedKeywordError,
     discover_candidates,
 )
+from app.services.marketplace_features import (
+    CompetitionSummary,
+    PriceSummary,
+    PurchaseProxySummary,
+)
+from app.services.marketplace_research import run_marketplace_research
 from app.services.scoring import score_opportunity
 from app.services.search_demand import run_search_demand_research
 from app.services.search_demand_features import SearchDemandSummary
@@ -47,6 +58,10 @@ def get_candidate_provider() -> CandidateGenerationProvider:
 # required when a provider is actually used. Replaceable with Google Ads later.
 SEARCH_DEMAND_PROVIDERS: dict[str, type[SearchDemandProvider]] = {
     "dataforseo": DataForSeoSearchDemandProvider,
+}
+
+MARKETPLACE_PROVIDERS: dict[str, type[MarketplaceProvider]] = {
+    "etsy": EtsyMarketplaceProvider,
 }
 
 
@@ -137,6 +152,96 @@ class SearchDemandResearchResponse(BaseModel):
 class SnapshotEvidenceResponse(BaseModel):
     snapshot: EvidenceSnapshot
     evidence: list[EvidenceItem]
+
+
+class MarketplaceResearchRequest(BaseModel):
+    candidates: list[Candidate] | None = None
+    research_run_id: UUID | None = None
+    provider: str = "etsy"
+    max_provider_calls: int | None = Field(default=None, ge=0, le=200)
+    max_queries: int | None = Field(default=None, ge=1, le=100)
+    max_results_per_query: int | None = Field(default=None, ge=1, le=100)
+    max_review_lookups: int | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "MarketplaceResearchRequest":
+        if (self.candidates is None) == (self.research_run_id is None):
+            raise ValueError("provide exactly one of 'candidates' or 'research_run_id'")
+        if self.candidates is not None and not self.candidates:
+            raise ValueError("'candidates' must not be empty")
+        return self
+
+
+class PurchaseProxySummaryOut(BaseModel):
+    candidate_id: UUID
+    relevant_listing_count: int
+    listings_with_review_data: int
+    listings_with_reviews: int
+    median_review_count: float | None
+    upper_quartile_review_count: float | None
+    review_concentration: float | None
+    rating_distribution: dict[str, int]
+    missing_data_count: int
+    features_version: str
+
+    @classmethod
+    def from_summary(cls, s: PurchaseProxySummary) -> "PurchaseProxySummaryOut":
+        return cls(**{f: getattr(s, f) for f in cls.model_fields})
+
+
+class PriceSummaryOut(BaseModel):
+    candidate_id: UUID
+    relevant_paid_comparable_count: int
+    unique_seller_count: int
+    currency: str | None
+    min_price: float | None
+    p25_price: float | None
+    median_price: float | None
+    p75_price: float | None
+    max_price: float | None
+    missing_data_count: int
+    insufficient_evidence: bool
+    features_version: str
+
+    @classmethod
+    def from_summary(cls, s: PriceSummary) -> "PriceSummaryOut":
+        return cls(**{f: getattr(s, f) for f in cls.model_fields})
+
+
+class CompetitionSummaryOut(BaseModel):
+    candidate_id: UUID
+    relevant_listing_count: int
+    unique_seller_count: int
+    seller_concentration: float | None
+    review_burden_median: float | None
+    review_burden_p75: float | None
+    price_dispersion: float | None
+    rating_distribution: dict[str, int]
+    median_listing_age_days: float | None
+    listings_with_age_data: int
+    missing_data_count: int
+    features_version: str
+
+    @classmethod
+    def from_summary(cls, s: CompetitionSummary) -> "CompetitionSummaryOut":
+        return cls(**{f: getattr(s, f) for f in cls.model_fields})
+
+
+class CandidateMarketplaceSummaryOut(BaseModel):
+    candidate_id: UUID
+    purchase_proxy: PurchaseProxySummaryOut
+    price: PriceSummaryOut
+    competition: CompetitionSummaryOut
+
+
+class MarketplaceResearchResponse(BaseModel):
+    snapshot: EvidenceSnapshot
+    summaries: list[CandidateMarketplaceSummaryOut]
+    evidence_ids_by_candidate: dict[UUID, list[UUID]]
+    provider_errors: list[str]
+    missing_queries: list[MissingKeywordOut]
+    cached_query_count: int
+    review_lookups_used: int
 
 
 @router.get("/health")
@@ -232,6 +337,90 @@ async def research_search_demand(
             for m in result.missing_keywords
         ],
         cached_keyword_count=result.cached_keyword_count,
+    )
+
+
+@router.post("/research/marketplace", response_model=MarketplaceResearchResponse)
+async def research_marketplace(
+    request: MarketplaceResearchRequest,
+    store: ResearchStore = Depends(get_research_store),
+) -> MarketplaceResearchResponse:
+    provider_cls = MARKETPLACE_PROVIDERS.get(request.provider)
+    if provider_cls is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown marketplace provider '{request.provider}'; "
+            f"available: {sorted(MARKETPLACE_PROVIDERS)}",
+        )
+
+    if request.candidates is not None:
+        candidates = request.candidates
+        research_run_id = None
+    else:
+        candidates_or_none = store.get_run_candidates(request.research_run_id)
+        if candidates_or_none is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"research run {request.research_run_id} not found",
+            )
+        candidates = candidates_or_none
+        research_run_id = request.research_run_id
+
+    try:
+        provider = provider_cls()
+    except MissingCredentialsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    result = await run_marketplace_research(
+        candidates=candidates,
+        provider=provider,
+        store=store,
+        research_run_id=research_run_id,
+        max_provider_calls=request.max_provider_calls,
+        max_queries=request.max_queries,
+        max_results_per_query=request.max_results_per_query,
+        max_review_lookups=request.max_review_lookups,
+    )
+
+    return MarketplaceResearchResponse(
+        snapshot=result.snapshot,
+        summaries=[
+            CandidateMarketplaceSummaryOut(
+                candidate_id=candidate.id,
+                purchase_proxy=PurchaseProxySummaryOut.from_summary(
+                    result.purchase_proxy_summaries[candidate.id]
+                ),
+                price=PriceSummaryOut.from_summary(result.price_summaries[candidate.id]),
+                competition=CompetitionSummaryOut.from_summary(
+                    result.competition_summaries[candidate.id]
+                ),
+            )
+            for candidate in candidates
+        ],
+        evidence_ids_by_candidate=result.evidence_ids_by_candidate,
+        provider_errors=result.provider_errors,
+        missing_queries=[
+            MissingKeywordOut(keyword=m.keyword, reason=m.reason, candidate_ids=m.candidate_ids)
+            for m in result.missing_queries
+        ],
+        cached_query_count=result.cached_query_count,
+        review_lookups_used=result.review_lookups_used,
+    )
+
+
+@router.get("/research/snapshots/{snapshot_id}", response_model=SnapshotEvidenceResponse)
+def get_any_snapshot(
+    snapshot_id: UUID,
+    store: ResearchStore = Depends(get_research_store),
+) -> SnapshotEvidenceResponse:
+    """Generalized snapshot retrieval for any research type (search demand,
+    marketplace, and future signal types share one snapshot store)."""
+    snapshot = store.get_snapshot(snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"snapshot {snapshot_id} not found")
+    return SnapshotEvidenceResponse(
+        snapshot=snapshot,
+        evidence=store.evidence_for_snapshot(snapshot_id),
     )
 
 

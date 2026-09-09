@@ -42,6 +42,58 @@ Milestone 2 (search-demand evidence) is implemented:
   (`search_demand_dimension_v1`, a documented log-scale V1 heuristic) — no
   Opportunity Score, no GREEN/YELLOW/RED in this milestone
 
+Milestone 3A (Etsy marketplace evidence) is implemented:
+
+- `POST /research/marketplace`: attach observable Etsy marketplace evidence to
+  candidates via a typed batch `MarketplaceProvider` abstraction, with the
+  official Etsy Open API v3 as the first adapter (no scraping)
+- Field-level immutable evidence: listing price → `PRICE`, review count →
+  `PURCHASE` (as a purchase **proxy**), listing presence/seller → `COMPETITION`,
+  all `truth_class=OBSERVED`
+- Query dedupe, result dedupe by listing id, caching, request/result/review
+  caps, partial-failure handling, and telemetry, mirroring Milestone 2
+- Deterministic summaries (`marketplace_features_v1`): purchase proxy, robust
+  price quartiles, and observable competition features — no Opportunity Score,
+  no "optimal price", no "low competition = good" judgment
+- `GET /research/snapshots/{id}`: generalized snapshot retrieval for all
+  research types
+
+### Marketplace evidence limitations (OBSERVED vs proxy)
+
+`OBSERVED` means the field was returned directly by Etsy's official API — a
+listing price is an observed *asking* price, not a transaction record. A
+review count is observed marketplace data but only a **purchase proxy**: it
+proves some reviewed purchases occurred, never how many sales, units, or how
+much revenue. Exact competitor sales and revenue are UNKNOWN and are never
+inferred or invented — reviews are never converted into sales figures. Fields
+Etsy does not return (ratings and review counts are absent from listing
+search and require capped per-listing review lookups) stay null/UNKNOWN.
+
+### Etsy credentials / app setup
+
+1. Register an app at https://www.etsy.com/developers/register to get a
+   keystring. New apps start with provisional "personal" access; Etsy's
+   commercial-approval process is required for production/commercial use.
+2. Set `ETSY_API_KEY` (see `.env.example`). The adapter uses only public v3
+   application endpoints (`listings/active` keyword search and per-listing
+   reviews) authenticated with the `x-api-key` header — no OAuth user grant
+   and no scraping.
+
+### Controlled live Etsy smoke test (manual, rate-limited)
+
+```bash
+export ETSY_API_KEY=...
+export MARKETPLACE_MAX_PROVIDER_CALLS=3 MARKETPLACE_MAX_QUERIES=1 \
+       MARKETPLACE_MAX_RESULTS_PER_QUERY=5 MARKETPLACE_MAX_REVIEW_LOOKUPS=2
+uvicorn app.main:app &
+# discover candidates, note research_run_id, then:
+curl -X POST http://127.0.0.1:8000/research/marketplace \
+  -H 'Content-Type: application/json' \
+  -d '{"research_run_id": "<id>"}'
+```
+
+The caps limit the smoke test to one search plus two review lookups.
+
 ### Search-demand truth limitations
 
 Search demand is **not** purchase evidence. Search volume measures search

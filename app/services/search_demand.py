@@ -70,11 +70,11 @@ class QueryPlan:
     keyword_to_candidates: dict[str, list[UUID]]
 
 
-def plan_queries(candidates: list[Candidate]) -> QueryPlan:
+def plan_queries(candidates: list[Candidate], query_attr: str = "search_queries") -> QueryPlan:
     keywords: list[str] = []
     mapping: dict[str, list[UUID]] = {}
     for candidate in candidates:
-        for query in candidate.search_queries:
+        for query in getattr(candidate, query_attr):
             keyword = normalize_query(query)
             if not keyword:
                 continue
