@@ -8,12 +8,35 @@ Milestone 0 is implemented:
 
 - Evidence truth model
 - Opportunity dimensions
-- Deterministic Opportunity Score
-- Independent Evidence Confidence
-- GREEN/YELLOW/RED decision rules
 - Provider interfaces
 - FastAPI skeleton
 - Unit tests
+- A deterministic scoring *skeleton* — **quarantined, see below**
+
+### Scoring is not implemented (quarantined)
+
+Milestone 0 produced the shape of a future Opportunity Score, Evidence
+Confidence, and RED/YELLOW/GREEN classification. The shape is what Milestone
+0 approved; **the numbers in it were never approved**. The POS dimension
+weights, confidence weights, kill rules, and RED/YELLOW/GREEN thresholds in
+`app/services/scoring.py` are placeholder v0.1 values that appear in no
+approved repository specification and have never been validated against
+evidence.
+
+The `POST /score` endpoint that exposed them is therefore **disabled by
+default**: it returns `410 Gone` and is hidden from the OpenAPI schema, so
+an unapproved classification can never be presented as a product result.
+Nothing in the application depends on it. The module and its Milestone 0
+tests are retained rather than deleted, and calling into it raises a
+`DeprecationWarning`. Set `ENABLE_EXPERIMENTAL_SCORING=true` to re-enable
+the endpoint for local development only.
+
+There is no Product Opportunity Score in this system today. ARCHITECTURE.md
+places the real one at pipeline steps 8-9, after deep research — work that
+has not been specified or built. When it is, it should be built fresh
+against approved weights and thresholds, not by promoting these
+placeholders. The Milestone 3C preliminary ranking is structurally separate
+and cannot reach this module; tests enforce that statically and at runtime.
 
 Milestone 1 (candidate discovery) is implemented:
 
@@ -259,6 +282,26 @@ first criterion that differs decides a pair, which is what makes every
 ordering explainable: the response returns the deciding criterion and both
 values for each adjacent pair.
 
+> **This ordering is a V1 triage policy assumption, not an empirically
+> validated opportunity-ranking formula.**
+>
+> Nothing about it has been tested against real outcomes. No evidence shows
+> that a candidate ranked first is a better opportunity than one ranked
+> fifth — only that it had broader existing evidence and, failing that,
+> higher measured search demand. The criteria and their order encode one
+> policy choice: spend expensive deep research where corroborating evidence
+> already exists. Placing evidence breadth above search demand, and search
+> demand above audience interest, is a judgment call, not a finding.
+> Treating an observed zero as outranking an absent measurement is likewise
+> a stated policy, not a validated rule.
+>
+> Rank position is a research-priority ordering only. It is not a score, not
+> a verdict, not a prediction, and never a claim that a candidate is
+> commercially validated. The ordering is expected to change once real
+> outcome data exists; `preliminary_rank_v1` is versioned so that when it
+> does, earlier results remain reproducible and attributable to this
+> policy.
+
 ```bash
 curl -X POST http://127.0.0.1:8000/research/preliminary \
   -H 'Content-Type: application/json' \
@@ -320,6 +363,7 @@ Copy `.env.example` and fill in real values (never commit them):
 - `PUBLIC_CONTENT_MAX_VIDEOS_PER_QUERY` — videos requested per query (default 10, max 50)
 - `PUBLIC_CONTENT_MAX_QUOTA_UNITS` — quota units spent per request (default 1000)
 - `PUBLIC_CONTENT_MAX_CHANNEL_LOOKUPS` — batched channel-stats calls per request (default 2; 0 disables)
+- `ENABLE_EXPERIMENTAL_SCORING` — re-enables the quarantined `POST /score` endpoint for local development only (default off; its output is not a valid product result)
 
 ## Run locally
 

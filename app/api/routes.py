@@ -1,3 +1,4 @@
+import os
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -944,9 +945,57 @@ async def research_preliminary(
     )
 
 
-@router.post("/score", response_model=ScoreResult)
+# --------------------------------------------------------------------------
+# QUARANTINED: unapproved experimental scoring.
+#
+# `POST /score` exposed app.services.scoring, whose POS weights, Evidence
+# Confidence weights, kill rules, and RED/YELLOW/GREEN thresholds are
+# placeholder v0.1 values that appear in no approved repository
+# specification. A caller could not tell that from the response, so the
+# endpoint could present an unapproved classification as a product verdict.
+#
+# Nothing in this application depends on it: it is referenced nowhere but
+# here, and no milestone consumes it. It is therefore disabled by default
+# rather than deleted, so the Milestone 0 foundation and its tests survive.
+#
+# Set ENABLE_EXPERIMENTAL_SCORING=true to re-enable it for local
+# development only. It stays out of the OpenAPI schema either way, so it is
+# never advertised as a supported surface.
+# --------------------------------------------------------------------------
+
+ENV_ENABLE_EXPERIMENTAL_SCORING = "ENABLE_EXPERIMENTAL_SCORING"
+
+EXPERIMENTAL_SCORING_DISABLED_DETAIL = (
+    "POST /score is disabled. It exposed unapproved experimental scoring "
+    "(placeholder POS weights, Evidence Confidence weights, kill rules, and "
+    "RED/YELLOW/GREEN thresholds) that is not part of any approved "
+    "specification, so its output is not a valid product result. The "
+    "Product Opportunity Score is not implemented yet. For deterministic "
+    "preliminary triage of candidates, use POST /research/preliminary, "
+    "which ranks without any final scoring."
+)
+
+
+def experimental_scoring_enabled() -> bool:
+    """True only when an operator explicitly opts in for local development."""
+    return os.environ.get(ENV_ENABLE_EXPERIMENTAL_SCORING, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+@router.post(
+    "/score",
+    response_model=ScoreResult,
+    deprecated=True,
+    include_in_schema=False,
+)
 def score(
     dimensions: ScoreDimensions,
     evidence: list[EvidenceItem],
 ) -> ScoreResult:
+    """Disabled by default: unapproved experimental scoring. Not a product result."""
+    if not experimental_scoring_enabled():
+        raise HTTPException(status_code=410, detail=EXPERIMENTAL_SCORING_DISABLED_DETAIL)
     return score_opportunity(dimensions, evidence)

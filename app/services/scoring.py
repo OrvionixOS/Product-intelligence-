@@ -1,7 +1,54 @@
+"""UNAPPROVED EXPERIMENTAL SCORING — DO NOT USE FOR PRODUCT RESULTS.
+
+Milestone 0 built this module as a foundation exercise: a deterministic
+shape for a future Product Opportunity Score and Evidence Confidence Score.
+The *shape* is what Milestone 0 approved. The numbers in it are not.
+
+Specifically unapproved, and therefore not usable as a product result:
+
+- the POS dimension weights in `WEIGHTS`
+- the confidence weights in `CONFIDENCE_WEIGHTS`
+- the RED/YELLOW/GREEN thresholds in `classify`
+- the kill rules in `apply_kill_rules`
+
+None of these appear in an approved repository specification. They are
+placeholder v0.1 values, never validated against evidence, and a
+classification derived from them must never be presented to a user as a
+verdict on a candidate. ARCHITECTURE.md places the real Opportunity Score,
+Evidence Confidence, and RED/YELLOW/GREEN at pipeline steps 8-9, after deep
+research — work that has not been specified or built.
+
+This module is retained only so the Milestone 0 tests keep documenting the
+intended structure. It is quarantined:
+
+- the `POST /score` endpoint that exposed it is disabled by default (see
+  `app/api/routes.py`);
+- calling `score_opportunity` emits a DeprecationWarning;
+- the Milestone 3C preliminary-ranking path must never import or call
+  anything in this module, and `tests/test_orchestration.py` enforces that
+  both statically and at runtime.
+
+The final scoring engine is not designed here. When it is specified, it
+should be built fresh against approved weights and thresholds rather than
+by promoting these placeholders.
+"""
+
+import warnings
 from collections.abc import Iterable
 
 from app.domain.enums import Classification, TruthClass
 from app.domain.models import EvidenceItem, ScoreDimensions, ScoreResult
+
+# Machine-readable quarantine marker. Anything that finds this constant on a
+# module is looking at unapproved scoring logic, not a product surface.
+SCORING_STATUS = "UNAPPROVED_EXPERIMENTAL"
+
+UNAPPROVED_SCORING_NOTICE = (
+    "app.services.scoring contains unapproved placeholder POS weights, "
+    "Evidence Confidence weights, kill rules, and RED/YELLOW/GREEN "
+    "thresholds. Its output is not a valid product result and must not be "
+    "presented as one."
+)
 
 WEIGHTS = {
     "purchase_evidence": 0.25,
@@ -93,6 +140,7 @@ def score_opportunity(
     dimensions: ScoreDimensions,
     evidence: list[EvidenceItem],
 ) -> ScoreResult:
+    warnings.warn(UNAPPROVED_SCORING_NOTICE, DeprecationWarning, stacklevel=2)
     score, missing = weighted_opportunity_score(dimensions)
     confidence = evidence_confidence(evidence)
     kills = apply_kill_rules(dimensions, evidence)

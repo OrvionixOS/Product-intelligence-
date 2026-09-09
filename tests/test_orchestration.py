@@ -4,6 +4,7 @@ Every provider here is an in-memory fake. No network, no live API calls, no
 Etsy or YouTube smoke tests.
 """
 
+import pathlib
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -11,7 +12,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from app.domain.enums import ProductFormat, SnapshotStatus, TruthClass
-from app.domain.models import Candidate
+from app.domain.models import Candidate, ScoreDimensions
 from app.providers.base import (
     ChannelStatsResult,
     KeywordDemandMetrics,
@@ -967,3 +968,177 @@ def _profile_with(candidate: Candidate, search_value: float | None):
         marketplace=None,
         public_content=None,
     )
+
+
+# ------------------------------------------- legacy scoring quarantine (3C)
+#
+# app/services/scoring.py holds unapproved placeholder POS weights, Evidence
+# Confidence weights, kill rules, and RED/YELLOW/GREEN thresholds. The
+# Milestone 3C preliminary-ranking path must never reach it. These tests
+# enforce that structurally (import graph) and at runtime (poisoned symbols).
+
+
+LEGACY_SCORING_MODULE = "app.services.scoring"
+
+# The modules that make up the 3C path.
+THREE_C_MODULES = (
+    "app.services.preliminary_dimensions",
+    "app.services.preliminary_ranking",
+    "app.services.research_orchestration",
+)
+
+
+def _transitive_app_imports(module_name: str, seen: set[str] | None = None) -> set[str]:
+    """Every app.* module reachable from `module_name` by static import."""
+    import ast
+    import importlib.util
+
+    seen = seen if seen is not None else set()
+    if module_name in seen:
+        return seen
+    seen.add(module_name)
+
+    spec = importlib.util.find_spec(module_name)
+    assert spec is not None and spec.origin, f"cannot locate {module_name}"
+    tree = ast.parse(pathlib.Path(spec.origin).read_text())
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            names = [node.module] if node.module else []
+        else:
+            continue
+        for name in names:
+            if name and name.startswith("app."):
+                _transitive_app_imports(name, seen)
+    return seen
+
+
+def test_three_c_modules_never_import_legacy_scoring():
+    """Static guarantee: legacy scoring is not in the 3C import graph."""
+    for module_name in THREE_C_MODULES:
+        reachable = _transitive_app_imports(module_name)
+        assert LEGACY_SCORING_MODULE not in reachable, (
+            f"{module_name} can reach {LEGACY_SCORING_MODULE} via "
+            f"{sorted(reachable)}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_preliminary_path_does_not_call_legacy_scoring(monkeypatch):
+    """Runtime guarantee: poison every legacy scoring symbol, then run 3C."""
+    from app.services import scoring
+
+    def poisoned(*args: Any, **kwargs: Any):
+        raise AssertionError(
+            "Milestone 3C invoked unapproved legacy POS/RED-YELLOW-GREEN scoring"
+        )
+
+    for symbol in (
+        "score_opportunity",
+        "weighted_opportunity_score",
+        "evidence_confidence",
+        "apply_kill_rules",
+        "classify",
+    ):
+        monkeypatch.setattr(scoring, symbol, poisoned)
+
+    candidates = [make_candidate(f"Cand {i}") for i in range(7)]
+    search, marketplace, content = full_providers(candidates)
+    result = await orchestrate(
+        candidates, search=search, marketplace=marketplace, content=content
+    )
+
+    # The full 3C path completed without touching any poisoned symbol.
+    assert len(result.ranking.ranked) == 7
+    assert len(result.ranking.selected) == DEEP_RESEARCH_SELECTION_SIZE
+    for ranked in result.ranking.ranked:
+        explain_pairwise(ranked, result.ranking.ranked[0])
+
+
+def test_preliminary_endpoint_does_not_call_legacy_scoring(monkeypatch):
+    """The HTTP 3C surface must not reach legacy scoring either."""
+    from fastapi.testclient import TestClient
+
+    from app.api import routes
+    from app.main import app
+    from app.services import scoring
+
+    def poisoned(*args: Any, **kwargs: Any):
+        raise AssertionError("POST /research/preliminary invoked legacy scoring")
+
+    monkeypatch.setattr(scoring, "score_opportunity", poisoned)
+    monkeypatch.setattr(routes, "score_opportunity", poisoned)
+
+    candidates = [make_candidate(f"Cand {i}") for i in range(3)]
+    search, marketplace, content = full_providers(candidates)
+    monkeypatch.setitem(routes.SEARCH_DEMAND_PROVIDERS, "dataforseo", lambda: search)
+    monkeypatch.setitem(routes.MARKETPLACE_PROVIDERS, "etsy", lambda: marketplace)
+    monkeypatch.setitem(routes.PUBLIC_CONTENT_PROVIDERS, "youtube", lambda: content)
+
+    client = TestClient(app)
+    response = client.post(
+        "/research/preliminary",
+        json={"candidates": [c.model_dump(mode="json") for c in candidates]},
+    )
+    assert response.status_code == 200, response.text
+    assert len(response.json()["ranked"]) == 3
+
+
+def test_score_endpoint_is_disabled_by_default(monkeypatch):
+    """The quarantined endpoint must not serve an unapproved classification."""
+    from fastapi.testclient import TestClient
+
+    from app.api import routes
+    from app.main import app
+
+    monkeypatch.delenv(routes.ENV_ENABLE_EXPERIMENTAL_SCORING, raising=False)
+    client = TestClient(app)
+    response = client.post("/score", json={"dimensions": {}, "evidence": []})
+
+    assert response.status_code == 410
+    detail = response.json()["detail"]
+    assert "unapproved experimental scoring" in detail
+    assert "not a valid product result" in detail
+    # No score, confidence, or classification is returned.
+    for leaked in ("opportunity_score", "evidence_confidence", "classification"):
+        assert leaked not in response.text
+
+
+def test_score_endpoint_is_hidden_from_the_public_api_schema():
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    schema = TestClient(app).get("/openapi.json").json()
+    assert "/score" not in schema["paths"]
+    # The 3C surface is the advertised one.
+    assert "/research/preliminary" in schema["paths"]
+
+
+def test_legacy_scoring_is_marked_unapproved():
+    from app.services import scoring
+
+    assert scoring.SCORING_STATUS == "UNAPPROVED_EXPERIMENTAL"
+    assert "UNAPPROVED" in scoring.__doc__
+    # Calling it warns that its output is not a product result.
+    with pytest.warns(DeprecationWarning, match="unapproved"):
+        scoring.score_opportunity(ScoreDimensions(), [])
+
+
+def test_experimental_scoring_stays_reachable_for_local_development(monkeypatch):
+    """Quarantine, not deletion: Milestone 0's foundation still runs opt-in."""
+    from fastapi.testclient import TestClient
+
+    from app.api import routes
+    from app.main import app
+
+    monkeypatch.setenv(routes.ENV_ENABLE_EXPERIMENTAL_SCORING, "true")
+    client = TestClient(app)
+    response = client.post(
+        "/score",
+        json={"dimensions": {"search_demand": 50.0}, "evidence": []},
+    )
+    assert response.status_code == 200
+    assert "opportunity_score" in response.json()

@@ -30,6 +30,25 @@ commercial claim about any candidate.
     Criteria 6 and 7 are pure tie-breakers: they carry no evidential meaning
     and exist so that identical evidence always yields identical output.
 
+V1 TRIAGE POLICY ASSUMPTION — NOT A VALIDATED FORMULA
+
+    The criteria above, and the order they are applied in, are a policy
+    choice, not an empirical finding. Nothing here has been tested against
+    real outcomes. No evidence shows that a candidate ranked first is a
+    better opportunity than one ranked fifth — only that it had broader
+    existing evidence and, failing that, higher measured search demand.
+
+    Placing evidence breadth above search demand, and search demand above
+    audience interest, is a judgment call about where to spend expensive
+    deep research. Treating an observed zero as outranking an absent
+    measurement is likewise a stated policy, not a validated rule.
+
+    Rank position is a research-priority ordering only. It is not a score,
+    not a verdict, not a prediction, and never a claim that a candidate is
+    commercially validated. The ordering is expected to change once real
+    outcome data exists; the version string exists so that when it does,
+    earlier results stay reproducible and attributable to this policy.
+
 Rules this module holds to:
 
 - Deterministic and pure: same inputs, same order, every time. No clock, no
@@ -40,7 +59,10 @@ Rules this module holds to:
   has-value flag in the sort key, and an observed 0 outranks an absent
   measurement.
 - No POS weights, no ECS thresholds, no RED/YELLOW/GREEN, no kill rules, no
-  "validated" verdict. Rank position is a research-priority ordering only.
+  "validated" verdict. This module must never import or call
+  app.services.scoring, whose weights and thresholds are unapproved
+  placeholders; tests/test_orchestration.py enforces that statically and at
+  runtime.
 """
 
 from collections.abc import Callable, Sequence
