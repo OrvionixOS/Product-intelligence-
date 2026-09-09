@@ -36,11 +36,17 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - Creator-relative content-outlier foundation (content_outlier_v1, no age term)
 - Query/quota/lookup caps, caching, telemetry, partial-failure handling
 
-### Milestone 3C — Research orchestration
-- Preliminary research all candidates
-- Evidence → dimension bridge and normalization
-- Preliminary ranking
-- Top-five deep-research selection
+### Milestone 3C — Research orchestration (implemented)
+- Preliminary research all candidates across every capability implemented
+  through 3B, with honest per-capability partial failure
+- Evidence → preliminary dimension bridge preserving provenance, truth
+  class, missing/UNKNOWN state, and source references
+- Deterministic preliminary ranking (`preliminary_rank_v1`, lexicographic,
+  no invented weights) with explainable pairwise ordering
+- Deterministic top-five deep-research selection with deterministic
+  tie-breaking
+- Explicitly NOT final POS/ECS: no weights, no thresholds, no
+  RED/YELLOW/GREEN in this slice
 
 ## Milestone 4 — Product + pricing
 - Narrow product generator

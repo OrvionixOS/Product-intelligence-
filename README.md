@@ -8,12 +8,38 @@ Milestone 0 is implemented:
 
 - Evidence truth model
 - Opportunity dimensions
-- Deterministic Opportunity Score
-- Independent Evidence Confidence
-- GREEN/YELLOW/RED decision rules
 - Provider interfaces
 - FastAPI skeleton
 - Unit tests
+- A deterministic scoring *skeleton* — **not reachable, see below**
+
+### Scoring is not implemented (removed from the API)
+
+Milestone 0 produced the shape of a future Opportunity Score, Evidence
+Confidence, and RED/YELLOW/GREEN classification. The shape is what Milestone
+0 approved; **the numbers in it were never approved**. The POS dimension
+weights, confidence weights, kill rules, and RED/YELLOW/GREEN thresholds in
+`app/services/scoring.py` are placeholder v0.1 values that appear in no
+approved repository specification and have never been validated against
+evidence.
+
+The `POST /score` endpoint that exposed them has therefore been
+**removed**: it returns `410 Gone` for every request, is hidden from the
+OpenAPI schema, and **there is no configuration that re-enables it**.
+`app/api/routes.py` no longer imports the scoring module at all, so no
+served route can reach it. Nothing in the application depended on it.
+
+The module itself is retained rather than deleted, because the approved
+final scoring engine may reuse or refactor that work. It survives as
+importable library code with its Milestone 0 tests intact, and calling into
+it raises a `DeprecationWarning`.
+
+There is no Product Opportunity Score in this system today. ARCHITECTURE.md
+places the real one at pipeline steps 8-9, after deep research — work that
+has not been specified or built. When it is, it should be built fresh
+against approved weights and thresholds, not by promoting these
+placeholders. The Milestone 3C preliminary ranking is structurally separate
+and cannot reach this module; tests enforce that statically and at runtime.
 
 Milestone 1 (candidate discovery) is implemented:
 
@@ -197,6 +223,109 @@ curl -X POST http://127.0.0.1:8000/research/public-content \
 The caps above limit the smoke test to one search pass over at most three
 videos plus one channel-stats batch — 102 quota units total.
 
+Milestone 3C (research orchestration + preliminary ranking) is implemented:
+
+- `POST /research/preliminary`: take the candidate set from Milestone 1,
+  coordinate every evidence capability implemented through 3B, bridge the
+  stored evidence into explicit preliminary dimensions, rank deterministically,
+  and select the top five for the later deep-research stage
+- Capabilities run in a fixed order and each one is independent: a provider
+  that fails, is disabled, or has no credentials is reported as a capability
+  outcome (`PROVIDER_FAILED` / `NOT_REQUESTED`) and the run continues on the
+  remaining evidence. Each capability delegates to its existing runner, so its
+  caps, cache, cost, and quota accounting are preserved unchanged
+- Evidence bridge (`preliminary_dimensions_v1`): every preliminary dimension
+  keeps its contributing evidence ids, providers, source references,
+  truth basis, missing/UNKNOWN state, and named formula version
+
+#### Preliminary dimensions
+
+| Dimension | State | Formula |
+| --- | --- | --- |
+| `preliminary_search_demand` | scored | `search_demand_dimension_v1` |
+| `preliminary_audience_interest` | scored | `audience_interest_dimension_v1` |
+| `preliminary_price_evidence` | unscored observables | none approved |
+| `preliminary_purchase_proxy` | unscored observables | none approved |
+| `preliminary_competition_field` | unscored observables | none approved |
+
+Only the two formulas already approved in this repository produce a 0-100
+value. Marketplace evidence has no approved 0-100 formula, so it is bridged
+as `EVIDENCE_PRESENT_UNSCORED` with its raw observable counts — no score is
+invented. Dimension names are namespaced away from `ScoreDimensions` so
+preliminary features can never be mistaken for, or silently wired into, the
+final POS/ECS engine.
+
+Four dimension states are distinguished and none of them is ever rewritten
+as zero: `SCORED`, `EVIDENCE_PRESENT_UNSCORED`, `UNKNOWN` (evidence
+collected, measurement unavailable), and `MISSING` (no evidence collected,
+with a stated reason). Zero appears only where a formula explicitly defines
+it as an observed value.
+
+#### Preliminary ranking (`preliminary_rank_v1`)
+
+Ranking is a **research-priority triage ordering**, not the Product
+Opportunity Score, and makes no commercial claim about any candidate. It is
+fully deterministic; an LLM never manufactures, adjusts, or assigns any
+number in this path. Candidates are ordered by a fixed lexicographic
+sequence of criteria — there is no weighted composite, because no dimension
+weights are approved in the specification and 3C does not invent any:
+
+1. `evidence_breadth` — count of dimensions backed by real evidence, desc
+2. `search_demand` — `search_demand_dimension_v1` value, desc
+3. `audience_interest` — `audience_interest_dimension_v1` value, desc
+4. `price_comparables` — count of OBSERVED priced comparables, desc
+5. `purchase_proxy_signals` — count of OBSERVED review-count proxies, desc
+6. `title` — case-folded candidate title, asc (pure tie-break)
+7. `candidate_id` — UUID string, asc (final deterministic tie-break)
+
+A missing or UNKNOWN value sorts after every candidate that has a value on
+that criterion, via an explicit has-value flag in the sort key — it is never
+compared as zero, and an observed 0 outranks an absent measurement. The
+first criterion that differs decides a pair, which is what makes every
+ordering explainable: the response returns the deciding criterion and both
+values for each adjacent pair.
+
+> **This ordering is a V1 triage policy assumption, not an empirically
+> validated opportunity-ranking formula.**
+>
+> Nothing about it has been tested against real outcomes. No evidence shows
+> that a candidate ranked first is a better opportunity than one ranked
+> fifth — only that it had broader existing evidence and, failing that,
+> higher measured search demand. The criteria and their order encode one
+> policy choice: spend expensive deep research where corroborating evidence
+> already exists. Placing evidence breadth above search demand, and search
+> demand above audience interest, is a judgment call, not a finding.
+> Treating an observed zero as outranking an absent measurement is likewise
+> a stated policy, not a validated rule.
+>
+> Rank position is a research-priority ordering only. It is not a score, not
+> a verdict, not a prediction, and never a claim that a candidate is
+> commercially validated. The ordering is expected to change once real
+> outcome data exists; `preliminary_rank_v1` is versioned so that when it
+> does, earlier results remain reproducible and attributable to this
+> policy.
+
+```bash
+curl -X POST http://127.0.0.1:8000/research/preliminary \
+  -H 'Content-Type: application/json' \
+  -d '{"research_run_id": "<id from /candidates/discover>"}'
+```
+
+Disable a capability by passing its provider as `null` (e.g.
+`{"marketplace": null}`). `selection_size` defaults to 5.
+
+#### What 3C deliberately does not do
+
+No Product Opportunity Score, no Evidence Confidence Score, no
+RED/YELLOW/GREEN classification, no kill rules, no POS weights, no ECS
+thresholds, no ML, and no claim that any candidate is commercially
+validated. Etsy review counts remain a purchase proxy and are never read as
+sales; YouTube views and engagement remain audience interest and are never
+read as purchase evidence; INFERRED values are never presented as OBSERVED.
+A dimension value produced by a formula is itself a derivation, so its
+`value_truth_class` is `INFERRED` even when every input was `OBSERVED`; the
+inputs' own class is reported separately as `evidence_truth_basis`.
+
 ### Search-demand truth limitations
 
 Search demand is **not** purchase evidence. Search volume measures search
@@ -237,6 +366,15 @@ Copy `.env.example` and fill in real values (never commit them):
 - `PUBLIC_CONTENT_MAX_VIDEOS_PER_QUERY` — videos requested per query (default 10, max 50)
 - `PUBLIC_CONTENT_MAX_QUOTA_UNITS` — quota units spent per request (default 1000)
 - `PUBLIC_CONTENT_MAX_CHANNEL_LOOKUPS` — batched channel-stats calls per request (default 2; 0 disables)
+
+### Known technical debt
+
+- **Unbounded in-memory research store.** `ResearchStore` is a process-wide,
+  append-only, in-memory store with no eviction, so snapshots and evidence
+  accumulate for the life of the process. Milestone 3C adds three snapshots
+  per preliminary run rather than one, which reaches the limit sooner.
+  Deferred deliberately: it is resolved by the persistence milestone that
+  implements `schema.sql`, not by patching the in-memory seam.
 
 ## Run locally
 
@@ -305,7 +443,8 @@ pytest -q
 
 All DataForSEO, Etsy, and YouTube calls in tests go through
 `httpx.MockTransport` or fake providers; automated tests never touch the
-network.
+network. Milestone 3C adds no live calls and no Etsy or YouTube smoke
+tests — its orchestration tests drive in-memory fake providers only.
 
 ## One real DataForSEO smoke test (manual, costs real credits)
 

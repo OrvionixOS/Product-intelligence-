@@ -1,7 +1,57 @@
+"""UNAPPROVED EXPERIMENTAL SCORING — DO NOT USE FOR PRODUCT RESULTS.
+
+Milestone 0 built this module as a foundation exercise: a deterministic
+shape for a future Product Opportunity Score and Evidence Confidence Score.
+The *shape* is what Milestone 0 approved. The numbers in it are not.
+
+Specifically unapproved, and therefore not usable as a product result:
+
+- the POS dimension weights in `WEIGHTS`
+- the confidence weights in `CONFIDENCE_WEIGHTS`
+- the RED/YELLOW/GREEN thresholds in `classify`
+- the kill rules in `apply_kill_rules`
+
+None of these appear in an approved repository specification. They are
+placeholder v0.1 values, never validated against evidence, and a
+classification derived from them must never be presented to a user as a
+verdict on a candidate. ARCHITECTURE.md places the real Opportunity Score,
+Evidence Confidence, and RED/YELLOW/GREEN at pipeline steps 8-9, after deep
+research — work that has not been specified or built.
+
+This module is retained deliberately: the approved final scoring engine may
+reuse or refactor this work, and the Milestone 0 tests keep documenting the
+intended structure. It is unreachable from the API:
+
+- `POST /score` has been removed. It returns 410 Gone for every request and
+  there is no configuration that re-enables it;
+- `app/api/routes.py` no longer imports this module at all, so no served
+  route can reach it even by mistake;
+- calling `score_opportunity` emits a DeprecationWarning;
+- the Milestone 3C preliminary-ranking path must never import or call
+  anything here, and `tests/test_orchestration.py` enforces every one of
+  these guarantees statically and at runtime.
+
+Import it directly only from tests, or from the future approved engine once
+its weights and thresholds are specified. The final scoring engine is not
+designed here, and these placeholders must not simply be promoted into it.
+"""
+
+import warnings
 from collections.abc import Iterable
 
 from app.domain.enums import Classification, TruthClass
 from app.domain.models import EvidenceItem, ScoreDimensions, ScoreResult
+
+# Machine-readable quarantine marker. Anything that finds this constant on a
+# module is looking at unapproved scoring logic, not a product surface.
+SCORING_STATUS = "UNAPPROVED_EXPERIMENTAL"
+
+UNAPPROVED_SCORING_NOTICE = (
+    "app.services.scoring contains unapproved placeholder POS weights, "
+    "Evidence Confidence weights, kill rules, and RED/YELLOW/GREEN "
+    "thresholds. Its output is not a valid product result and must not be "
+    "presented as one."
+)
 
 WEIGHTS = {
     "purchase_evidence": 0.25,
@@ -93,6 +143,7 @@ def score_opportunity(
     dimensions: ScoreDimensions,
     evidence: list[EvidenceItem],
 ) -> ScoreResult:
+    warnings.warn(UNAPPROVED_SCORING_NOTICE, DeprecationWarning, stacklevel=2)
     score, missing = weighted_opportunity_score(dimensions)
     confidence = evidence_confidence(evidence)
     kills = apply_kill_rules(dimensions, evidence)
