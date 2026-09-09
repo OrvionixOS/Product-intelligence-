@@ -1068,8 +1068,11 @@ def test_preliminary_endpoint_does_not_call_legacy_scoring(monkeypatch):
     def poisoned(*args: Any, **kwargs: Any):
         raise AssertionError("POST /research/preliminary invoked legacy scoring")
 
+    # routes.py no longer imports the legacy module at all, so there is no
+    # routes-level alias left to poison; patching the module itself covers
+    # every remaining path into it.
+    assert not hasattr(routes, "score_opportunity")
     monkeypatch.setattr(scoring, "score_opportunity", poisoned)
-    monkeypatch.setattr(routes, "score_opportunity", poisoned)
 
     candidates = [make_candidate(f"Cand {i}") for i in range(3)]
     search, marketplace, content = full_providers(candidates)
@@ -1086,24 +1089,63 @@ def test_preliminary_endpoint_does_not_call_legacy_scoring(monkeypatch):
     assert len(response.json()["ranked"]) == 3
 
 
-def test_score_endpoint_is_disabled_by_default(monkeypatch):
-    """The quarantined endpoint must not serve an unapproved classification."""
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        {},
+        {"dimensions": {}, "evidence": []},
+        {"dimensions": {"search_demand": 90.0}, "evidence": []},
+    ],
+)
+def test_score_endpoint_is_removed_for_every_request_shape(body):
+    """No request can obtain an unapproved classification from /score."""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    response = TestClient(app).post("/score", json=body)
+
+    assert response.status_code == 410
+    detail = response.json()["detail"]
+    assert "removed" in detail
+    assert "no configuration that re-enables it" in detail
+    # No score, confidence, or classification is ever returned.
+    for leaked in ("opportunity_score", "evidence_confidence", "classification"):
+        assert leaked not in response.text
+
+
+def test_no_environment_variable_can_re_enable_scoring(monkeypatch):
+    """The escape hatch is gone: no env setting brings the endpoint back."""
     from fastapi.testclient import TestClient
 
     from app.api import routes
     from app.main import app
 
-    monkeypatch.delenv(routes.ENV_ENABLE_EXPERIMENTAL_SCORING, raising=False)
-    client = TestClient(app)
-    response = client.post("/score", json={"dimensions": {}, "evidence": []})
+    assert not hasattr(routes, "ENV_ENABLE_EXPERIMENTAL_SCORING")
+    assert not hasattr(routes, "experimental_scoring_enabled")
 
+    for name in (
+        "ENABLE_EXPERIMENTAL_SCORING",
+        "EXPERIMENTAL_SCORING",
+        "ENABLE_SCORING",
+        "DEBUG",
+    ):
+        monkeypatch.setenv(name, "true")
+
+    response = TestClient(app).post(
+        "/score", json={"dimensions": {"search_demand": 90.0}, "evidence": []}
+    )
     assert response.status_code == 410
-    detail = response.json()["detail"]
-    assert "unapproved experimental scoring" in detail
-    assert "not a valid product result" in detail
-    # No score, confidence, or classification is returned.
-    for leaked in ("opportunity_score", "evidence_confidence", "classification"):
-        assert leaked not in response.text
+
+
+def test_api_layer_does_not_import_legacy_scoring():
+    """Strongest guarantee: no served route can reach the legacy module."""
+    for module_name in ("app.main", "app.api.routes"):
+        reachable = _transitive_app_imports(module_name)
+        assert LEGACY_SCORING_MODULE not in reachable, (
+            f"{module_name} can reach {LEGACY_SCORING_MODULE}"
+        )
 
 
 def test_score_endpoint_is_hidden_from_the_public_api_schema():
@@ -1127,18 +1169,17 @@ def test_legacy_scoring_is_marked_unapproved():
         scoring.score_opportunity(ScoreDimensions(), [])
 
 
-def test_experimental_scoring_stays_reachable_for_local_development(monkeypatch):
-    """Quarantine, not deletion: Milestone 0's foundation still runs opt-in."""
-    from fastapi.testclient import TestClient
+def test_legacy_scoring_module_is_retained_for_future_refactor():
+    """Unreachable from the API, but preserved as importable library code.
 
-    from app.api import routes
-    from app.main import app
+    The approved final scoring engine may reuse or refactor this work, so
+    the module and its Milestone 0 behaviour stay intact.
+    """
+    from app.services import scoring
 
-    monkeypatch.setenv(routes.ENV_ENABLE_EXPERIMENTAL_SCORING, "true")
-    client = TestClient(app)
-    response = client.post(
-        "/score",
-        json={"dimensions": {"search_demand": 50.0}, "evidence": []},
-    )
-    assert response.status_code == 200
-    assert "opportunity_score" in response.json()
+    assert callable(scoring.score_opportunity)
+    assert scoring.WEIGHTS, "Milestone 0 weights must survive for later reuse"
+    assert scoring.CONFIDENCE_WEIGHTS
+    with pytest.warns(DeprecationWarning):
+        result = scoring.score_opportunity(ScoreDimensions(search_demand=50.0), [])
+    assert result.scoring_version, "results still record their algorithm version"

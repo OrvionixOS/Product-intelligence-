@@ -11,9 +11,9 @@ Milestone 0 is implemented:
 - Provider interfaces
 - FastAPI skeleton
 - Unit tests
-- A deterministic scoring *skeleton* — **quarantined, see below**
+- A deterministic scoring *skeleton* — **not reachable, see below**
 
-### Scoring is not implemented (quarantined)
+### Scoring is not implemented (removed from the API)
 
 Milestone 0 produced the shape of a future Opportunity Score, Evidence
 Confidence, and RED/YELLOW/GREEN classification. The shape is what Milestone
@@ -23,13 +23,16 @@ weights, confidence weights, kill rules, and RED/YELLOW/GREEN thresholds in
 approved repository specification and have never been validated against
 evidence.
 
-The `POST /score` endpoint that exposed them is therefore **disabled by
-default**: it returns `410 Gone` and is hidden from the OpenAPI schema, so
-an unapproved classification can never be presented as a product result.
-Nothing in the application depends on it. The module and its Milestone 0
-tests are retained rather than deleted, and calling into it raises a
-`DeprecationWarning`. Set `ENABLE_EXPERIMENTAL_SCORING=true` to re-enable
-the endpoint for local development only.
+The `POST /score` endpoint that exposed them has therefore been
+**removed**: it returns `410 Gone` for every request, is hidden from the
+OpenAPI schema, and **there is no configuration that re-enables it**.
+`app/api/routes.py` no longer imports the scoring module at all, so no
+served route can reach it. Nothing in the application depended on it.
+
+The module itself is retained rather than deleted, because the approved
+final scoring engine may reuse or refactor that work. It survives as
+importable library code with its Milestone 0 tests intact, and calling into
+it raises a `DeprecationWarning`.
 
 There is no Product Opportunity Score in this system today. ARCHITECTURE.md
 places the real one at pipeline steps 8-9, after deep research — work that
@@ -363,7 +366,6 @@ Copy `.env.example` and fill in real values (never commit them):
 - `PUBLIC_CONTENT_MAX_VIDEOS_PER_QUERY` — videos requested per query (default 10, max 50)
 - `PUBLIC_CONTENT_MAX_QUOTA_UNITS` — quota units spent per request (default 1000)
 - `PUBLIC_CONTENT_MAX_CHANNEL_LOOKUPS` — batched channel-stats calls per request (default 2; 0 disables)
-- `ENABLE_EXPERIMENTAL_SCORING` — re-enables the quarantined `POST /score` endpoint for local development only (default off; its output is not a valid product result)
 
 ## Run locally
 

@@ -18,19 +18,22 @@ verdict on a candidate. ARCHITECTURE.md places the real Opportunity Score,
 Evidence Confidence, and RED/YELLOW/GREEN at pipeline steps 8-9, after deep
 research — work that has not been specified or built.
 
-This module is retained only so the Milestone 0 tests keep documenting the
-intended structure. It is quarantined:
+This module is retained deliberately: the approved final scoring engine may
+reuse or refactor this work, and the Milestone 0 tests keep documenting the
+intended structure. It is unreachable from the API:
 
-- the `POST /score` endpoint that exposed it is disabled by default (see
-  `app/api/routes.py`);
+- `POST /score` has been removed. It returns 410 Gone for every request and
+  there is no configuration that re-enables it;
+- `app/api/routes.py` no longer imports this module at all, so no served
+  route can reach it even by mistake;
 - calling `score_opportunity` emits a DeprecationWarning;
 - the Milestone 3C preliminary-ranking path must never import or call
-  anything in this module, and `tests/test_orchestration.py` enforces that
-  both statically and at runtime.
+  anything here, and `tests/test_orchestration.py` enforces every one of
+  these guarantees statically and at runtime.
 
-The final scoring engine is not designed here. When it is specified, it
-should be built fresh against approved weights and thresholds rather than
-by promoting these placeholders.
+Import it directly only from tests, or from the future approved engine once
+its weights and thresholds are specified. The final scoring engine is not
+designed here, and these placeholders must not simply be promoted into it.
 """
 
 import warnings
