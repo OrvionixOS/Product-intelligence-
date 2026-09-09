@@ -29,8 +29,12 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - Purchase-proxy, price, and competition evidence + deterministic extractors
 - Query/result caps, caching, telemetry, partial-failure handling
 
-### Milestone 3B — YouTube public-content evidence
-- YouTube Data API adapter behind PublicContentProvider
+### Milestone 3B — YouTube public-content evidence (implemented)
+- Typed batch PublicContentProvider contract
+- YouTube Data API v3 adapter (search + videos + channels; quota-accounted)
+- Audience-interest evidence + deterministic extractors
+- Creator-relative content-outlier foundation (content_outlier_v1, no age term)
+- Query/quota/lookup caps, caching, telemetry, partial-failure handling
 
 ### Milestone 3C — Research orchestration
 - Preliminary research all candidates

@@ -1,14 +1,34 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
 
 
 class ProviderError(Exception):
     """Base class for research-provider failures.
 
     Messages must never contain credentials.
+
+    Adapters annotate failures with what the failed operation consumed so
+    callers can keep budgets honest:
+
+    - calls_consumed: HTTP requests the operation performed, the failed
+      attempt included (default 1).
+    - quota_units_consumed: quota units known to have been charged for the
+      operation, or None when that cannot be known (e.g. transport-level
+      failures) — callers should then budget conservatively and mark their
+      accounting as inexact rather than report zero.
     """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        calls_consumed: int = 1,
+        quota_units_consumed: int | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.calls_consumed = calls_consumed
+        self.quota_units_consumed = quota_units_consumed
 
 
 class MissingCredentialsError(ProviderError):
@@ -78,19 +98,6 @@ class SearchDemandBatchResult:
     cost: float | None = None
     cost_is_estimate: bool = True
     errors: list[str] = field(default_factory=list)
-
-
-@dataclass(slots=True)
-class ProviderEnvelope:
-    provider: str
-    provider_version: str | None
-    retrieved_at: str
-    collection_method: str
-    geography: str | None
-    language: str | None
-    source_reference: str | None
-    raw_payload: dict[str, Any]
-    limitations: list[str]
 
 
 class SearchDemandProvider(ABC):
@@ -192,7 +199,101 @@ class MarketplaceProvider(ABC):
         raise NotImplementedError(f"{self.name} does not support review stats")
 
 
+@dataclass(slots=True, frozen=True)
+class VideoObservation:
+    """Provider-agnostic public video observation.
+
+    Every optional field is None unless the provider actually returned it —
+    hidden or absent metrics are never zero-filled. Public view/like/comment
+    counts measure audience interest in content; they are never watch time,
+    retention, impressions, CTR, subscribers gained, sales, or revenue —
+    those are private and remain UNKNOWN.
+    """
+
+    video_id: str
+    title: str | None = None
+    description: str | None = None
+    published_at: datetime | None = None
+    channel_id: str | None = None
+    channel_title: str | None = None
+    view_count: int | None = None
+    like_count: int | None = None
+    comment_count: int | None = None
+    duration_seconds: int | None = None
+    tags: tuple[str, ...] = ()
+    category: str | None = None
+    channel_subscriber_count: int | None = None
+    channel_video_count: int | None = None
+    channel_view_count: int | None = None
+    # When channel statistics were actually looked up; distinguishes
+    # "stats fetched but hidden (None)" from "never fetched".
+    channel_stats_retrieved_at: datetime | None = None
+    url: str | None = None
+    retrieved_at: datetime | None = None
+
+
+@dataclass(slots=True)
+class PublicContentQueryResult:
+    """Result of one provider search pass for a single content query."""
+
+    provider: str
+    query: str
+    videos: list[VideoObservation]
+    retrieved_at: datetime
+    collection_method: str
+    total_available: int | None = None
+    source_reference: str | None = None
+    provider_version: str | None = None
+    call_count: int = 0
+    quota_units: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True, frozen=True)
+class ChannelStats:
+    """Public channel statistics; hidden fields (e.g. hidden subscriber
+    counts) stay None."""
+
+    channel_id: str
+    subscriber_count: int | None
+    video_count: int | None
+    view_count: int | None
+    retrieved_at: datetime
+
+
+@dataclass(slots=True)
+class ChannelStatsResult:
+    stats: dict[str, ChannelStats]
+    call_count: int = 1
+    quota_units: int = 0
+    errors: list[str] = field(default_factory=list)
+
+
 class PublicContentProvider(ABC):
+    """Batch public-content research contract (mirrors MarketplaceProvider).
+
+    Implementations translate their own response shapes into
+    VideoObservation records; the domain layer never sees provider payloads.
+    Designed so YouTube can be joined by other content platforms later.
+    """
+
+    name: str = "unknown"
+    collection_method: str = "official_api"
+    max_videos_per_query: int = 10
+    max_channels_per_stats_request: int = 50
+    supports_channel_stats: bool = False
+    # Call shape and quota one operation consumes; the service layer derives
+    # its budget checks from these instead of assuming a request pattern.
+    calls_per_search: int = 1
+    calls_per_channel_stats: int = 1
+    quota_units_per_search: int = 0
+    quota_units_per_channel_stats: int = 0
+
     @abstractmethod
-    async def research(self, query: str, geography: str, language: str) -> ProviderEnvelope:
+    async def search_videos(self, query: str, limit: int) -> PublicContentQueryResult:
+        """Search public videos for one normalized query."""
         raise NotImplementedError
+
+    async def fetch_channel_stats(self, channel_ids: list[str]) -> ChannelStatsResult:
+        """Fetch public channel statistics in one batch. Optional capability."""
+        raise NotImplementedError(f"{self.name} does not support channel stats")

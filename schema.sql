@@ -119,6 +119,37 @@ create table if not exists marketplace_listing_observations (
   created_at timestamptz not null default now()
 );
 
+-- Canonical public-content video observations (Milestone 3B). One row per
+-- (provider, video, retrieval): the deduped observation that per-candidate
+-- evidence_items reference via raw_payload_hash. Public counts are audience
+-- interest only; private metrics (watch time, retention, impressions, CTR,
+-- subscriber conversion, sales, revenue) are never stored because they are
+-- never known. Hidden statistics stay null — never zero.
+create table if not exists public_content_video_observations (
+  id uuid primary key default gen_random_uuid(),
+  provider text not null,
+  video_id text not null,
+  title text,
+  description text,
+  published_at timestamptz,
+  channel_id text,
+  channel_title text,
+  view_count bigint,
+  like_count bigint,
+  comment_count bigint,
+  duration_seconds integer,
+  tags jsonb not null default '[]'::jsonb,
+  category text,
+  channel_subscriber_count bigint,
+  channel_video_count bigint,
+  channel_view_count bigint,
+  channel_stats_retrieved_at timestamptz,
+  url text,
+  retrieved_at timestamptz not null,
+  raw_payload_hash text not null,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists score_versions (
   id uuid primary key default gen_random_uuid(),
   opportunity_id uuid not null references opportunities(id) on delete cascade,
@@ -143,3 +174,5 @@ create index if not exists idx_snapshots_research_run on evidence_snapshots(rese
 create index if not exists idx_evidence_provider_collected on evidence_items(provider, collected_at desc);
 create index if not exists idx_scores_opportunity_calculated on score_versions(opportunity_id, calculated_at desc);
 create index if not exists idx_marketplace_obs_provider_listing on marketplace_listing_observations(provider, listing_id, retrieved_at desc);
+create index if not exists idx_content_obs_provider_video on public_content_video_observations(provider, video_id, retrieved_at desc);
+create index if not exists idx_content_obs_channel on public_content_video_observations(channel_id, published_at desc);

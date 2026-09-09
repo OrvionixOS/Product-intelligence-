@@ -119,6 +119,84 @@ The caps above limit the smoke test to one listing search over at most three
 listings plus one review lookup. Do not run it until the Etsy app has the
 access level your usage requires.
 
+Milestone 3B (YouTube public-content evidence) is implemented:
+
+- `POST /research/public-content`: attach real public-content evidence to
+  candidates via a typed batch `PublicContentProvider` abstraction, with the
+  official YouTube Data API v3 as the first adapter
+- What is collected per video (only when YouTube actually returns it):
+  video ID, title, description, published date, channel ID/title, public
+  view/like/comment counts, duration, tags, category, and — via a capped
+  batched channel lookup — public subscriber/video/view counts per channel
+- Three evidence classifications per matched video:
+  - `purpose=AUDIENCE` / view count: `truth_class=OBSERVED` when returned,
+    `UNKNOWN` when hidden — never zero-filled
+  - `purpose=AUDIENCE` / engagement rate (likes÷views):
+    `truth_class=INFERRED` — deterministically derived from OBSERVED
+    fields, formula named in the evidence record
+  - `purpose=CONTENT` / observation: the video's presence and metadata as
+    content-pattern research input (`OBSERVED`)
+- Deterministic extractors (`public_content_features_v1`): audience-interest
+  features (video/channel counts, robust view/like/comment medians,
+  recency, engagement) and `audience_interest_dimension_v1` (documented
+  log-scale V1 heuristic mirroring the search-demand dimension; the
+  10M-median-views saturation point is an explicit assumption)
+- Content-outlier foundation (`content_outlier_v1`): creator-relative
+  ratios — video views ÷ the median views of that channel's collected
+  sample (≥3 videos required for a baseline). **No age term** — an old
+  video and a new video with the same views get the same ratio. These are
+  content-performance outlier observations, never "viral predictions"
+- Query dedupe across candidates, video dedupe by ID (a shared video is one
+  observation supporting many candidates), caching, caps, explicit **quota
+  accounting** (YouTube's cost model: one search pass = 101 units, one
+  channel batch = 1 unit; every response reports `quota_units_used`), and
+  graceful partial failure
+- Retrieve stored snapshots via
+  `GET /research/public-content/snapshots/{snapshot_id}`
+
+### YouTube evidence limitations (what is unavailable)
+
+Private platform metrics are **not** public and are never estimated by
+anything, LLMs included: watch time, retention, impressions, CTR,
+subscriber conversion, traffic sources, sales, and revenue all remain
+`UNKNOWN`. Hidden public metrics (disabled like counts, disabled comments,
+hidden subscriber counts) stay null. Search results are a provider-ranked
+sample, not the full content field. View counts measure content interest —
+never buyers, purchases, or purchase intent.
+
+### YouTube credentials / quota
+
+Set `YOUTUBE_API_KEY` (a Google Cloud API key with the YouTube Data API v3
+enabled; see `.env.example`). The default project quota is 10,000 units per
+day; this service enforces a per-request quota budget
+(`PUBLIC_CONTENT_MAX_QUOTA_UNITS`, default 1,000) and reports units used in
+every response. Queries beyond the budget are reported as
+`quota_budget_exhausted` — never silently dropped or guessed. Failed
+requests are accounted too: quota the API is known to have charged is added
+exactly, and when a failure makes exact consumption unknowable (e.g. a
+transport error) the full operation cost is budgeted conservatively and the
+response flags `quota_units_is_exact: false` — never zero merely because
+the request failed.
+
+### Future controlled live YouTube smoke test (manual, spends real quota)
+
+```bash
+export YOUTUBE_API_KEY=...
+export PUBLIC_CONTENT_MAX_QUERIES=1 PUBLIC_CONTENT_MAX_VIDEOS_PER_QUERY=3 \
+       PUBLIC_CONTENT_MAX_QUOTA_UNITS=102 PUBLIC_CONTENT_MAX_CHANNEL_LOOKUPS=1
+uvicorn app.main:app &
+curl -s -X POST http://127.0.0.1:8000/candidates/discover \
+  -H 'Content-Type: application/json' \
+  -d '{"seed_keyword": "sourdough baking", "target_count": 2}' | python3 -c \
+  'import json,sys; print(json.load(sys.stdin)["research_run_id"])'
+curl -X POST http://127.0.0.1:8000/research/public-content \
+  -H 'Content-Type: application/json' \
+  -d '{"research_run_id": "<printed id>"}'
+```
+
+The caps above limit the smoke test to one search pass over at most three
+videos plus one channel-stats batch — 102 quota units total.
+
 ### Search-demand truth limitations
 
 Search demand is **not** purchase evidence. Search volume measures search
@@ -152,6 +230,13 @@ Copy `.env.example` and fill in real values (never commit them):
 - `MARKETPLACE_MAX_QUERIES` — cap on unique marketplace queries per request (default 25)
 - `MARKETPLACE_MAX_LISTINGS_PER_QUERY` — listings requested per query (default 25, max 100)
 - `MARKETPLACE_MAX_REVIEW_LOOKUPS` — per-listing review-count lookups per request (default 20; 0 disables)
+- `YOUTUBE_API_KEY` — required for real public-content research
+- `YOUTUBE_BASE_URL` — optional API base override
+- `PUBLIC_CONTENT_MAX_PROVIDER_CALLS` — cap on YouTube HTTP calls per request (default 20)
+- `PUBLIC_CONTENT_MAX_QUERIES` — cap on unique content queries per request (default 25)
+- `PUBLIC_CONTENT_MAX_VIDEOS_PER_QUERY` — videos requested per query (default 10, max 50)
+- `PUBLIC_CONTENT_MAX_QUOTA_UNITS` — quota units spent per request (default 1000)
+- `PUBLIC_CONTENT_MAX_CHANNEL_LOOKUPS` — batched channel-stats calls per request (default 2; 0 disables)
 
 ## Run locally
 
@@ -198,14 +283,29 @@ per-candidate purchase-proxy/price/competition summaries, evidence
 references, provider errors, and explicit missing/unknown evidence. Retrieve
 a stored snapshot via `GET /research/marketplace/snapshots/{snapshot_id}`.
 
+## Research public content (YouTube)
+
+```bash
+curl -X POST http://127.0.0.1:8000/research/public-content \
+  -H 'Content-Type: application/json' \
+  -d '{"research_run_id": "<id from /candidates/discover>"}'
+```
+
+The response contains snapshot metadata, quota telemetry
+(`quota_units_used`), per-candidate audience-interest summaries with
+content-outlier observations, evidence references, provider errors, and
+explicit missing/unknown records. Retrieve a stored snapshot via
+`GET /research/public-content/snapshots/{snapshot_id}`.
+
 ## Tests (fully mocked — no API credits spent)
 
 ```bash
 pytest -q
 ```
 
-All DataForSEO and Etsy calls in tests go through `httpx.MockTransport` or
-fake providers; automated tests never touch the network.
+All DataForSEO, Etsy, and YouTube calls in tests go through
+`httpx.MockTransport` or fake providers; automated tests never touch the
+network.
 
 ## One real DataForSEO smoke test (manual, costs real credits)
 

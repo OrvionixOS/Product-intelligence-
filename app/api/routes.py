@@ -13,10 +13,12 @@ from app.domain.models import (
 from app.providers.base import (
     MarketplaceProvider,
     MissingCredentialsError,
+    PublicContentProvider,
     SearchDemandProvider,
 )
 from app.providers.dataforseo import DataForSeoSearchDemandProvider
 from app.providers.etsy import EtsyMarketplaceProvider
+from app.providers.youtube import YouTubeContentProvider
 from app.providers.llm import (
     CandidateGenerationError,
     CandidateGenerationProvider,
@@ -34,6 +36,8 @@ from app.services.marketplace_features import (
     PriceSummary,
     PurchaseProxySummary,
 )
+from app.services.public_content import run_public_content_research
+from app.services.public_content_features import ContentOutlier, PublicContentSummary
 from app.services.scoring import score_opportunity
 from app.services.search_demand import run_search_demand_research
 from app.services.search_demand_features import SearchDemandSummary
@@ -64,6 +68,11 @@ SEARCH_DEMAND_PROVIDERS: dict[str, type[SearchDemandProvider]] = {
 # Marketplace adapters; joinable by other official marketplace APIs later.
 MARKETPLACE_PROVIDERS: dict[str, type[MarketplaceProvider]] = {
     "etsy": EtsyMarketplaceProvider,
+}
+
+# Public-content adapters; joinable by other official platform APIs later.
+PUBLIC_CONTENT_PROVIDERS: dict[str, type[PublicContentProvider]] = {
+    "youtube": YouTubeContentProvider,
 }
 
 
@@ -286,6 +295,109 @@ class MissingQueryOut(BaseModel):
     candidate_ids: list[UUID]
 
 
+class PublicContentResearchRequest(BaseModel):
+    candidates: list[Candidate] | None = None
+    research_run_id: UUID | None = None
+    provider: str = "youtube"
+    max_provider_calls: int | None = Field(default=None, ge=0, le=500)
+    max_queries: int | None = Field(default=None, ge=1, le=200)
+    max_videos_per_query: int | None = Field(default=None, ge=1, le=50)
+    max_quota_units: int | None = Field(default=None, ge=0, le=10000)
+    max_channel_lookups: int | None = Field(default=None, ge=0, le=100)
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "PublicContentResearchRequest":
+        if (self.candidates is None) == (self.research_run_id is None):
+            raise ValueError("provide exactly one of 'candidates' or 'research_run_id'")
+        if self.candidates is not None and not self.candidates:
+            raise ValueError("'candidates' must not be empty")
+        return self
+
+
+class ContentOutlierOut(BaseModel):
+    """A content-performance outlier observation — not a viral prediction."""
+
+    video_id: str
+    channel_id: str
+    video_views: int
+    channel_sample_size: int
+    channel_baseline_median_views: float
+    outlier_ratio: float
+    formula_version: str
+
+    @classmethod
+    def from_outlier(cls, o: ContentOutlier) -> "ContentOutlierOut":
+        return cls(
+            video_id=o.video_id,
+            channel_id=o.channel_id,
+            video_views=o.video_views,
+            channel_sample_size=o.channel_sample_size,
+            channel_baseline_median_views=o.channel_baseline_median_views,
+            outlier_ratio=o.outlier_ratio,
+            formula_version=o.formula_version,
+        )
+
+
+class PublicContentSummaryOut(BaseModel):
+    candidate_id: UUID
+    relevant_video_count: int
+    distinct_channel_count: int
+    total_views: int | None
+    median_views: float | None
+    max_views: int | None
+    median_likes: float | None
+    median_comments: float | None
+    median_engagement_rate: float | None
+    median_days_since_publish: float | None
+    videos_published_last_90_days: int
+    missing_view_count: int
+    missing_like_count: int
+    missing_comment_count: int
+    channels_with_baseline: int
+    content_outliers: list[ContentOutlierOut]
+    audience_interest_dimension: float | None
+    dimension_version: str
+    features_version: str
+
+    @classmethod
+    def from_summary(cls, s: PublicContentSummary) -> "PublicContentSummaryOut":
+        return cls(
+            candidate_id=s.candidate_id,
+            relevant_video_count=s.relevant_video_count,
+            distinct_channel_count=s.distinct_channel_count,
+            total_views=s.total_views,
+            median_views=s.median_views,
+            max_views=s.max_views,
+            median_likes=s.median_likes,
+            median_comments=s.median_comments,
+            median_engagement_rate=s.median_engagement_rate,
+            median_days_since_publish=s.median_days_since_publish,
+            videos_published_last_90_days=s.videos_published_last_90_days,
+            missing_view_count=s.missing_view_count,
+            missing_like_count=s.missing_like_count,
+            missing_comment_count=s.missing_comment_count,
+            channels_with_baseline=s.channels_with_baseline,
+            content_outliers=[ContentOutlierOut.from_outlier(o) for o in s.content_outliers],
+            audience_interest_dimension=s.audience_interest_dimension,
+            dimension_version=s.dimension_version,
+            features_version=s.features_version,
+        )
+
+
+class PublicContentResearchResponse(BaseModel):
+    snapshot: EvidenceSnapshot
+    summaries: list[PublicContentSummaryOut]
+    evidence_ids_by_candidate: dict[UUID, list[UUID]]
+    provider_errors: list[str]
+    missing_queries: list[MissingQueryOut]
+    cached_query_count: int
+    unique_video_count: int
+    quota_units_used: int
+    quota_units_is_exact: bool
+    channel_stats_fetched: int
+    channel_stats_skipped: int
+
+
 class MarketplaceResearchResponse(BaseModel):
     snapshot: EvidenceSnapshot
     summaries: list[MarketplaceCandidateSummaryOut]
@@ -476,6 +588,86 @@ async def research_marketplace(
     response_model=SnapshotEvidenceResponse,
 )
 def get_marketplace_snapshot(
+    snapshot_id: UUID,
+    store: ResearchStore = Depends(get_research_store),
+) -> SnapshotEvidenceResponse:
+    snapshot = store.get_snapshot(snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail=f"snapshot {snapshot_id} not found")
+    return SnapshotEvidenceResponse(
+        snapshot=snapshot,
+        evidence=store.evidence_for_snapshot(snapshot_id),
+    )
+
+
+@router.post("/research/public-content", response_model=PublicContentResearchResponse)
+async def research_public_content(
+    request: PublicContentResearchRequest,
+    store: ResearchStore = Depends(get_research_store),
+) -> PublicContentResearchResponse:
+    provider_cls = PUBLIC_CONTENT_PROVIDERS.get(request.provider)
+    if provider_cls is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown public-content provider '{request.provider}'; "
+            f"available: {sorted(PUBLIC_CONTENT_PROVIDERS)}",
+        )
+
+    if request.candidates is not None:
+        candidates = request.candidates
+        research_run_id = None
+    else:
+        candidates_or_none = store.get_run_candidates(request.research_run_id)
+        if candidates_or_none is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"research run {request.research_run_id} not found",
+            )
+        candidates = candidates_or_none
+        research_run_id = request.research_run_id
+
+    try:
+        provider = provider_cls()
+    except MissingCredentialsError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    result = await run_public_content_research(
+        candidates=candidates,
+        provider=provider,
+        store=store,
+        research_run_id=research_run_id,
+        max_provider_calls=request.max_provider_calls,
+        max_queries=request.max_queries,
+        max_videos_per_query=request.max_videos_per_query,
+        max_quota_units=request.max_quota_units,
+        max_channel_lookups=request.max_channel_lookups,
+    )
+
+    return PublicContentResearchResponse(
+        snapshot=result.snapshot,
+        summaries=[
+            PublicContentSummaryOut.from_summary(s) for s in result.summaries.values()
+        ],
+        evidence_ids_by_candidate=result.evidence_ids_by_candidate,
+        provider_errors=result.provider_errors,
+        missing_queries=[
+            MissingQueryOut(query=m.query, reason=m.reason, candidate_ids=m.candidate_ids)
+            for m in result.missing_queries
+        ],
+        cached_query_count=result.cached_query_count,
+        unique_video_count=result.unique_video_count,
+        quota_units_used=result.quota_units_used,
+        quota_units_is_exact=result.quota_units_is_exact,
+        channel_stats_fetched=result.channel_stats_fetched,
+        channel_stats_skipped=result.channel_stats_skipped,
+    )
+
+
+@router.get(
+    "/research/public-content/snapshots/{snapshot_id}",
+    response_model=SnapshotEvidenceResponse,
+)
+def get_public_content_snapshot(
     snapshot_id: UUID,
     store: ResearchStore = Depends(get_research_store),
 ) -> SnapshotEvidenceResponse:
