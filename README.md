@@ -798,15 +798,41 @@ optional fields on each element of `evidence[]`: `originating_queries` and
 `originating_query_shared`. Both may be `null`. No existing field is
 removed, renamed, or retyped, and 4A/4B/4C outputs are unchanged.
 
-### Known technical debt
+#### Provenance ordering is canonical
 
-- **4A and 4B provenance tuples are order-dependent.** `extract_purchase_evidence`
-  and `extract_price_evidence` build `provenance.evidence_ids` in evidence
-  arrival order, so shuffling an equivalent evidence set yields an equal-as-a-set
-  but unequal-as-a-tuple result. Measured on `e25795a5` before Milestone 4D-0:
-  50/50 shuffles differ. Milestone 4C made its own output order-invariant; 4A and
-  4B were never given the same treatment. 4D-0 deliberately does **not** fix this,
-  because changing it would change 4A/4B output. Worth a small dedicated slice.
+Milestone 4D-0.1 fixed a pre-existing nondeterminism: `extract_purchase_evidence`
+and `extract_price_evidence` built `provenance.evidence_ids` and
+`provenance.listing_ids` in evidence **arrival** order, so an equivalent
+evidence set produced a different provenance record depending on the order
+records happened to arrive. Measured on `89d28d59` before the fix: 100/100
+shuffled permutations differed for both extractors. Only `provenance` moved —
+`features` were byte-identical — but a specification that cannot be reproduced
+byte-for-byte from the same evidence is not reproducible.
+
+The invariant now holds:
+
+- `provenance.evidence_ids` is sorted, and so is `ListingView.evidence_ids`;
+- `provenance.listing_ids` is ordered by `(str(value), type name)`;
+- every other provenance field already passed through `sorted()`.
+
+Two rules make the fix safe. **`sorted()`, never `set()`** — an evidence id may
+legitimately repeat, because a record carrying no payload hash is deliberately
+never collapsed, and deduplicating to achieve ordering would silently change
+deduplication semantics and contradict `duplicate_evidence_suppressed`.
+**Order by `(str, type name)`, never `str()`** — identifier values keep whatever
+type the provider payload carried; only the ordering is canonical, so a
+mixed-type payload reaching the extractors through inline evidence orders
+deterministically instead of raising `TypeError`. The type name breaks the one
+tie `str()` alone leaves: two distinct values that render identically, such as
+`1` and `"1"`, would otherwise fall back to arrival order under Python's stable
+sort and stay nondeterministic.
+
+The `views` list returned by `collect_listing_views` is deliberately **not**
+sorted. It feeds feature computation, so leaving it in arrival order keeps
+feature invariance true by construction rather than by test. Any future consumer
+that exposes lineage canonicalizes its own provenance tuples.
+
+### Known technical debt
 
 - **Unbounded in-memory research store and its indexes.** `ResearchStore` is
   a process-wide, append-only, in-memory store with no eviction, so snapshots

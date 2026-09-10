@@ -309,6 +309,11 @@ def _winsorized_mean(values: list[int], quantile: float = WINSORIZE_QUANTILE) ->
     return round(sum(min(v, cap) for v in ordered) / len(ordered), 4)
 
 
+def _id_sort_key(value: object) -> tuple[str, str]:
+    """Total order over identifiers of any type, without coercing them."""
+    return (str(value), type(value).__name__)
+
+
 def _build_provenance(
     candidate_id: UUID,
     evidence: list[EvidenceItem],
@@ -320,8 +325,20 @@ def _build_provenance(
     retrieved = sorted(i.retrieved_at for i in contributing if i.retrieved_at is not None)
     return PurchaseEvidenceProvenance(
         candidate_id=candidate_id,
-        evidence_ids=evidence_ids,
-        listing_ids=tuple(listing.listing_id for listing in listings),
+        # Canonical order (Milestone 4D-0.1), so an equivalent evidence set
+        # always yields an identical provenance record however the records
+        # arrived. sorted(), never set(): an id may legitimately repeat when a
+        # record carries no payload hash and is therefore never collapsed, and
+        # discarding that multiplicity would change deduplication semantics.
+        evidence_ids=tuple(sorted(evidence_ids)),
+        # Ordered by (str, type name) so mixed identifier types compare
+        # without coercion: a listing id keeps whatever type the provider
+        # payload carried, and only the ORDERING is canonical. The type name
+        # breaks the one tie str() alone leaves — distinct values that render
+        # identically, such as 1 and "1" — which a stable sort would otherwise
+        # resolve by arrival order, reintroducing the very nondeterminism this
+        # milestone removes.
+        listing_ids=tuple(sorted((l.listing_id for l in listings), key=_id_sort_key)),
         providers=tuple(sorted({i.provider for i in contributing})),
         marketplaces=tuple(sorted({i.marketplace for i in contributing if i.marketplace})),
         source_references=tuple(
