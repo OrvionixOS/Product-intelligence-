@@ -832,6 +832,86 @@ sorted. It feeds feature computation, so leaving it in arrival order keeps
 feature invariance true by construction rather than by test. Any future consumer
 that exposes lineage canonicalizes its own provenance tuples.
 
+Milestone 4D (buyer reach) is implemented:
+
+- A deterministic Buyer Reach derivation (`app/services/buyer_reach.py`,
+  `buyer_reach_v1`) over evidence **already collected** by 3A/3B/3C. No
+  provider call, no quota, no new endpoint, no persistence
+- Returned by `POST /research/preliminary` under `buyer_reach`, as a third
+  independent `DerivationOutcome` behind the same failure boundary as 4A/4B
+
+#### Channel evidence is not buyer evidence
+
+This is the rule the milestone is built around. Relevant videos with real
+engagement demonstrate an observable content audience *around a problem*; they
+never establish that a viewer will buy. Etsy listings demonstrate marketplace
+supply and public commercial proxies; they never establish buyer reach. A
+keyword with an ad auction shows advertisers bid there; it says nothing about
+purchase intent.
+
+Buyer Reach therefore records **channels**, never buyers, and converts nothing:
+views are not buyers, subscribers are not reachable buyers, listings are not a
+buyer population, sellers are not market size, review proxies are not sales,
+CPC is not purchase intent, and multi-channel presence is not a better
+opportunity. `buyer_count`, `audience_size`, `market_size`,
+`conversion_probability`, `addressability` and `guaranteed_distribution` are
+permanent `UNKNOWN` markers on every result.
+
+#### Four claim layers, never collapsed
+
+| Layer | Question | Best attainable |
+| --- | --- | --- |
+| existence | did a provider return a concrete surface? | OBSERVED |
+| relevance | is the surface linked to *this* candidate? | **INFERRED, capped** |
+| activity | is the surface live or recent? | OBSERVED or UNKNOWN |
+| commercial | does anyone transact there? | **cited from 4A only** |
+
+Relevance is permanently capped at INFERRED. Milestone 4D-0 made its basis
+auditable — every record carries the normalized provider query that returned it
+— but a query is a Milestone 1 hypothesis, so relevance is a derivation, never
+an observation. Commercial activity is not computed here at all: promoting a
+purchase proxy to a channel would let a proxy read as a reach surface.
+
+#### Missing evidence never becomes zero reach
+
+Four facts stay distinguishable: the capability was not requested, the provider
+failed, the provider raised something unexpected, or it ran and returned nothing
+for this candidate. Only the last is an observed absence; the first three make
+the channel picture UNKNOWN. Buyer Reach receives the capability outcomes
+precisely so a failed marketplace call cannot read as "no marketplace channel".
+
+#### What the pattern does and does not say
+
+`reach_evidence_pattern_v1` reports NO_CHANNELS_OBSERVED, SINGLE_CHANNEL_CLASS,
+MULTI_CHANNEL_CLASS, or CHANNELS_UNKNOWN. It describes the **shape** of the
+evidence and nothing else — MULTI_CHANNEL_CLASS is not better, larger, or more
+reachable than SINGLE_CHANNEL_CLASS.
+
+`observed_across_multiple_providers` is deliberately literal rather than
+"corroborated": different provider surfaces observe different things, they do
+not verify one proposition.
+
+#### The paid-auction signal
+
+`paid_auction_observed` uses CPC and top-of-page bid data the search provider
+already returns, with no additional call. It means **only** that an advertiser
+auction was observably present. It is never purchase intent, conversion
+likelihood, market attractiveness, or marketplace competition. `null` means
+UNKNOWN — no keyword carried auction data — never "no auction".
+
+#### Geography
+
+Known only for search evidence. Marketplace and public-content records carry no
+per-record geography, and it is never inferred from absent data.
+
+#### Naming that cannot be conflated
+
+4D reports `sellers_with_relevant_listing_count`: sellers with any
+candidate-relevant listing. Milestone 4A's `distinct_seller_count` counts a
+**different population** — sellers carrying review-proxy evidence. The names
+differ so the two can never be silently conflated, and a regression test
+demonstrates the difference.
+
 ### Known technical debt
 
 - **Unbounded in-memory research store and its indexes.** `ResearchStore` is

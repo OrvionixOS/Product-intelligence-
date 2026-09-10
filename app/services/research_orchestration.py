@@ -62,6 +62,7 @@ from app.services.preliminary_ranking import (
     rank_candidates,
 )
 from app.services.public_content import run_public_content_research
+from app.services.buyer_reach import BuyerReachResult, extract_buyer_reach
 from app.services.price_evidence import (
     PriceEvidenceResult,
     extract_price_evidence,
@@ -103,6 +104,7 @@ STATUS_UNEXPECTED_PROVIDER_ERROR = "UNEXPECTED_PROVIDER_ERROR"
 # would imply a provider was involved.
 DERIVATION_PURCHASE_EVIDENCE = "purchase_evidence"
 DERIVATION_PRICE_EVIDENCE = "price_evidence"
+DERIVATION_BUYER_REACH = "buyer_reach"
 STATUS_DERIVATION_COMPLETE = "COMPLETE"
 STATUS_DERIVATION_NOT_REQUESTED = "NOT_REQUESTED"
 STATUS_DERIVATION_ERROR = "DERIVATION_ERROR"
@@ -287,6 +289,7 @@ class PreliminaryResearchResult:
     purchase_evidence: dict[UUID, PurchaseEvidenceResult] = field(default_factory=dict)
     # Milestone 4B: Price Evidence, derived for the selected candidates only.
     price_evidence: dict[UUID, PriceEvidenceResult] = field(default_factory=dict)
+    buyer_reach: dict[UUID, BuyerReachResult] = field(default_factory=dict)
     derivations: list[DerivationOutcome] = field(default_factory=list)
     orchestration_version: str = ORCHESTRATION_VERSION
     dimensions_version: str = PRELIMINARY_DIMENSIONS_VERSION
@@ -420,6 +423,7 @@ async def run_preliminary_research(
     unavailable_capabilities: dict[str, str] | None = None,
     derive_purchase_evidence: bool = True,
     derive_price_evidence: bool = True,
+    derive_buyer_reach: bool = True,
 ) -> PreliminaryResearchResult:
     """Coordinate every available evidence capability, then rank deterministically.
 
@@ -626,6 +630,25 @@ async def run_preliminary_research(
         DERIVATION_PRICE_EVIDENCE, derive_price_evidence, extract_price_evidence
     )
 
+    # Milestone 4D needs one thing the other derivations do not: WHY a
+    # capability produced nothing. Without it a failed capability would read
+    # as an absent channel, and missing evidence would silently become zero
+    # reach. The reasons are bound here rather than by widening the generic
+    # runner, so 4A and 4B keep their existing two-argument contract.
+    reach_missing_reasons = _capability_missing_reasons(failed_capabilities, outcomes)
+
+    def extract_reach(candidate_id, evidence):
+        return extract_buyer_reach(
+            candidate_id=candidate_id,
+            evidence=evidence,
+            missing_reasons=reach_missing_reasons,
+            research_run_id=run_id,
+        )
+
+    buyer_reach = run_derivation(
+        DERIVATION_BUYER_REACH, derive_buyer_reach, extract_reach
+    )
+
     return PreliminaryResearchResult(
         research_run_id=run_id,
         candidate_count=len(candidates),
@@ -634,8 +657,37 @@ async def run_preliminary_research(
         ranking=ranking,
         purchase_evidence=purchase_evidence,
         price_evidence=price_evidence,
+        buyer_reach=buyer_reach,
         derivations=derivations,
     )
+
+
+def _capability_missing_reasons(
+    failed_capabilities: set[str], outcomes: list[CapabilityOutcome]
+) -> dict[str, str]:
+    """Why each capability produced no evidence, keyed by CAPABILITY name.
+
+    `_missing_reasons` answers the same question keyed by preliminary
+    DIMENSION name, which is what 3C's profile builder needs. Buyer Reach
+    reasons about capabilities directly — a failed marketplace call means an
+    unknown marketplace channel — so it needs the capability key instead.
+    Both read the same outcomes; neither changes the other.
+    """
+    by_capability = {o.capability: o for o in outcomes}
+    reasons: dict[str, str] = {}
+    for capability in CAPABILITY_ORDER:
+        if capability not in failed_capabilities:
+            continue
+        outcome = by_capability.get(capability)
+        if outcome is None:
+            continue
+        if outcome.status == STATUS_NOT_REQUESTED:
+            reasons[capability] = MISSING_CAPABILITY_NOT_REQUESTED
+        elif outcome.status == STATUS_UNEXPECTED_PROVIDER_ERROR:
+            reasons[capability] = MISSING_CAPABILITY_UNEXPECTED_ERROR
+        else:
+            reasons[capability] = MISSING_CAPABILITY_FAILED
+    return reasons
 
 
 def _missing_reasons(
