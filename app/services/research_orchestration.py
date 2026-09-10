@@ -62,6 +62,10 @@ from app.services.preliminary_ranking import (
     rank_candidates,
 )
 from app.services.public_content import run_public_content_research
+from app.services.price_evidence import (
+    PriceEvidenceResult,
+    extract_price_evidence,
+)
 from app.services.purchase_evidence import (
     PurchaseEvidenceResult,
     extract_purchase_evidence,
@@ -98,6 +102,7 @@ STATUS_UNEXPECTED_PROVIDER_ERROR = "UNEXPECTED_PROVIDER_ERROR"
 # it reports its own outcome rather than borrowing a capability status that
 # would imply a provider was involved.
 DERIVATION_PURCHASE_EVIDENCE = "purchase_evidence"
+DERIVATION_PRICE_EVIDENCE = "price_evidence"
 STATUS_DERIVATION_COMPLETE = "COMPLETE"
 STATUS_DERIVATION_NOT_REQUESTED = "NOT_REQUESTED"
 STATUS_DERIVATION_ERROR = "DERIVATION_ERROR"
@@ -280,6 +285,8 @@ class PreliminaryResearchResult:
     # Milestone 4A: Purchase Evidence derived for the selected candidates
     # only, from evidence already collected. Empty when not derived.
     purchase_evidence: dict[UUID, PurchaseEvidenceResult] = field(default_factory=dict)
+    # Milestone 4B: Price Evidence, derived for the selected candidates only.
+    price_evidence: dict[UUID, PriceEvidenceResult] = field(default_factory=dict)
     derivations: list[DerivationOutcome] = field(default_factory=list)
     orchestration_version: str = ORCHESTRATION_VERSION
     dimensions_version: str = PRELIMINARY_DIMENSIONS_VERSION
@@ -412,6 +419,7 @@ async def run_preliminary_research(
     selection_size: int = DEEP_RESEARCH_SELECTION_SIZE,
     unavailable_capabilities: dict[str, str] | None = None,
     derive_purchase_evidence: bool = True,
+    derive_price_evidence: bool = True,
 ) -> PreliminaryResearchResult:
     """Coordinate every available evidence capability, then rank deterministically.
 
@@ -561,45 +569,36 @@ async def run_preliminary_research(
     # It inherits the capability boundary: a failure here degrades this
     # derivation alone. Every dimension from 3C, and the ranking itself,
     # survive intact, and nothing is fabricated or defaulted to zero.
-    purchase_evidence: dict[UUID, PurchaseEvidenceResult] = {}
-    derivations: list[DerivationOutcome] = []
-    if not derive_purchase_evidence:
-        derivations.append(
-            DerivationOutcome(
-                derivation=DERIVATION_PURCHASE_EVIDENCE,
-                status=STATUS_DERIVATION_NOT_REQUESTED,
+    def run_derivation(name, requested, extractor):
+        """Run one derivation over already-collected evidence, safely.
+
+        Same two-arm contract as the capability boundary above: a failure
+        degrades this derivation alone, partial results are discarded rather
+        than reported as complete, BaseException still propagates, the full
+        traceback goes to the server-side log, and only a sanitized message
+        with a correlation id is exposed.
+        """
+        if not requested:
+            derivations.append(
+                DerivationOutcome(derivation=name, status=STATUS_DERIVATION_NOT_REQUESTED)
             )
-        )
-    else:
+            return {}
         try:
-            for ranked in ranking.selected:
-                purchase_evidence[ranked.candidate_id] = extract_purchase_evidence(
+            derived = {
+                ranked.candidate_id: extractor(
                     candidate_id=ranked.candidate_id,
                     evidence=evidence[ranked.candidate_id],
                 )
-            derivations.append(
-                DerivationOutcome(
-                    derivation=DERIVATION_PURCHASE_EVIDENCE,
-                    status=STATUS_DERIVATION_COMPLETE,
-                    candidates_covered=len(purchase_evidence),
-                )
-            )
+                for ranked in ranking.selected
+            }
         except Exception as exc:  # noqa: BLE001 - deliberate derivation boundary
-            # Same contract as the capability boundary above: BaseException
-            # still propagates, the traceback goes to the server-side log,
-            # and only a sanitized message with a correlation id is exposed.
             error_id = uuid4()
             logger.exception(
-                "Unexpected error in %s derivation (error_id=%s)",
-                DERIVATION_PURCHASE_EVIDENCE,
-                error_id,
+                "Unexpected error in %s derivation (error_id=%s)", name, error_id
             )
-            # Partial results are discarded rather than reported as if the
-            # derivation had completed for those candidates.
-            purchase_evidence = {}
             derivations.append(
                 DerivationOutcome(
-                    derivation=DERIVATION_PURCHASE_EVIDENCE,
+                    derivation=name,
                     status=STATUS_DERIVATION_ERROR,
                     failure_reason=(
                         f"{type(exc).__name__}: "
@@ -608,6 +607,24 @@ async def run_preliminary_research(
                     ),
                 )
             )
+            return {}
+        derivations.append(
+            DerivationOutcome(
+                derivation=name,
+                status=STATUS_DERIVATION_COMPLETE,
+                candidates_covered=len(derived),
+            )
+        )
+        return derived
+
+    derivations: list[DerivationOutcome] = []
+    # Each derivation is independent: one failing must not stop the other.
+    purchase_evidence = run_derivation(
+        DERIVATION_PURCHASE_EVIDENCE, derive_purchase_evidence, extract_purchase_evidence
+    )
+    price_evidence = run_derivation(
+        DERIVATION_PRICE_EVIDENCE, derive_price_evidence, extract_price_evidence
+    )
 
     return PreliminaryResearchResult(
         research_run_id=run_id,
@@ -616,6 +633,7 @@ async def run_preliminary_research(
         profiles=profiles,
         ranking=ranking,
         purchase_evidence=purchase_evidence,
+        price_evidence=price_evidence,
         derivations=derivations,
     )
 

@@ -64,9 +64,29 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   dimension returns EVIDENCE_PRESENT_UNSCORED rather than inventing one
 - Inherits the 3C failure boundary as a derivation outcome
 
-### Milestone 4B — Product + pricing (not started)
+### Milestone 4B — Price evidence (implemented)
+- Deterministic Price Evidence derivation over the marketplace PRICE
+  evidence already collected by 3A/3C — no new provider calls
+- Observed ASKING prices only. Never transaction prices, never willingness
+  to pay, never revenue, and never a price recommendation
+- **Per-currency price bands.** Currencies are never combined and none is
+  discarded in favour of a dominant one; no approved FX source exists, so
+  cross-currency comparison is explicitly not performed
+- $0 listings are preserved as free competitors: counted separately,
+  excluded from paid-price statistics, never treated as missing data and
+  never as a paid comparable
+- Prices are NOT normalized per item/template/page; a bundle and a single
+  item remain separate observed listing prices
+- No 0-100 score: no price-evidence formula is approved, so the dimension
+  returns EVIDENCE_PRESENT_UNSCORED
+- Shares one canonical listing view with 4A, so Purchase Evidence and Price
+  Evidence cannot derive contradictory paid-comparable definitions
+- Inherits the 4A DerivationOutcome and failure boundary
+
+### Milestone 4C — Product generator (not started)
 - Narrow product generator
-- Comparable price bands
+
+### Milestone 4D — Buyer reach (not started)
 - Buyer reach
 
 ## Milestone 5 — Faceless content intelligence
