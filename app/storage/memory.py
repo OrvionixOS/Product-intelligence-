@@ -28,6 +28,7 @@ class ResearchStore:
         self._snapshots: dict[UUID, EvidenceSnapshot] = {}
         self._evidence: dict[UUID, EvidenceItem] = {}
         self._evidence_by_snapshot: dict[UUID, list[UUID]] = {}
+        self._evidence_by_candidate: dict[UUID, list[UUID]] = {}
         self._keyword_cache: dict[tuple[str, str, str, str], tuple[datetime, KeywordDemandMetrics]] = {}
         self._listing_cache: dict[tuple[str, str], tuple[datetime, list[MarketplaceListing]]] = {}
         self._video_cache: dict[tuple[str, str], tuple[datetime, list[VideoObservation]]] = {}
@@ -67,12 +68,22 @@ class ResearchStore:
         self._evidence[item.id] = item
         if item.snapshot_id is not None:
             self._evidence_by_snapshot.setdefault(item.snapshot_id, []).append(item.id)
+        if item.candidate_id is not None:
+            self._evidence_by_candidate.setdefault(item.candidate_id, []).append(item.id)
 
     def get_evidence(self, evidence_id: UUID) -> EvidenceItem | None:
         return self._evidence.get(evidence_id)
 
     def evidence_for_snapshot(self, snapshot_id: UUID) -> list[EvidenceItem]:
         return [self._evidence[eid] for eid in self._evidence_by_snapshot.get(snapshot_id, [])]
+
+    def evidence_for_candidate(self, candidate_id: UUID) -> list[EvidenceItem]:
+        """Read-only view of everything stored for one candidate.
+
+        Insertion-ordered and append-only, like every other read here: this
+        resolves existing records, it never collects, mutates, or infers.
+        """
+        return [self._evidence[eid] for eid in self._evidence_by_candidate.get(candidate_id, [])]
 
     # ------------------------------------------------------------ keyword cache
 

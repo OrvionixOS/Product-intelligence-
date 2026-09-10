@@ -83,8 +83,35 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   Evidence cannot derive contradictory paid-comparable definitions
 - Inherits the 4A DerivationOutcome and failure boundary
 
-### Milestone 4C — Product generator (not started)
-- Narrow product generator
+### Milestone 4C — Product generator (implemented)
+- Deterministic product specification for ONE selected candidate, generated
+  on demand via `POST /product/specification`. Never generated automatically
+  for all five ranked candidates
+- `job_to_be_done_v1`: an eight-job taxonomy (CALCULATE, DECIDE, PLAN,
+  TRACK, LEARN, EXECUTE, ASSESS, ORGANISE) applied by deterministic keyword
+  matching. An approved but UNVALIDATED V1 heuristic, never described as
+  empirically proven. Signals that do not separate return UNKNOWN
+- `format_selection_v1` returns TWO separate answers: an `ideal_format`
+  that may lie outside V1 build capability (always ASSUMED, always labelled
+  as outside capability, never implied to be market-validated), and a
+  `buildable_v1_format` drawn only from Milestone 1's seven approved
+  formats. Milestone 1's candidate validator is unchanged
+- `SpecClaimClass` (OBSERVED / INFERRED / ASSUMED / UNKNOWN) is local to
+  4C. The shared `TruthClass` is untouched; ESTIMATED maps to INFERRED and
+  never to OBSERVED, and no class is ever upgraded
+- Per-field provenance: every field carries its claim class, a written
+  basis, contributing evidence ids, and signal types. A derived field is
+  capped by the weakest source it rests on
+- Price is a Milestone 4B citation only — observed ASKING prices, never a
+  recommended, optimal, or transaction price and never willingness to pay
+- No evidence produces a MISSING specification rather than an invented
+  product; sparse evidence generates but reports `insufficient_evidence`;
+  contradictory signals are preserved in `conflicts`
+- `ProductSpecificationProvider` reserves a future prose-only LLM seam. The
+  V1 default is a deterministic template and there is no live LLM
+  dependency. A provider may reword narrative fields only: it cannot touch
+  claim classes, evidence, formats, numbers, or decisions
+- Produces no score of any kind, and no POS/ECS/RED-YELLOW-GREEN
 
 ### Milestone 4D — Buyer reach (not started)
 - Buyer reach
