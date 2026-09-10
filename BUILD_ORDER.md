@@ -163,8 +163,51 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - Only observable change: two existing provenance arrays are now sorted. Same
   members, same multiplicity, no field, type, endpoint or schema change
 
-### Milestone 4D — Buyer reach (not started)
-- Buyer reach, gated on 4D-0 and 4D-0.1
+### Milestone 4D — Buyer reach (implemented)
+- Deterministic derivation over evidence already collected by 3A/3B/3C — no
+  new provider, no provider call, no endpoint, no persistence
+- **Channel evidence, never buyer evidence.** Records WHERE a seller could
+  show up and what is observably true about those places. It never estimates
+  buyer counts, audience size, market size, conversion, or reachable
+  population, and converts nothing: views are not buyers, subscribers are not
+  reachable buyers, listings are not a buyer population, sellers are not
+  market size, review proxies are not sales, CPC is not purchase intent
+- Three channel classes: `MARKETPLACE_STOREFRONT` (distinct sellers),
+  `CONTENT_PLATFORM_CREATOR` (distinct creators), `SEARCH_QUERY_SURFACE`
+  (keywords with observed volume)
+- Four claim layers kept apart, never collapsed: existence (OBSERVED),
+  relevance (**permanently capped at INFERRED** — it rests on a Milestone 1
+  query hypothesis), activity (OBSERVED or UNKNOWN), and commercial activity,
+  which is **cited from 4A only** and never derived here. A purchase proxy is
+  never promoted to a reach surface
+- Capability-aware MISSING: capability-not-requested, provider-failed,
+  unexpected-error and ran-but-empty stay four distinguishable facts. Missing
+  evidence never becomes zero reach
+- `reach_evidence_pattern_v1` describes evidence SHAPE only —
+  NO_CHANNELS_OBSERVED / SINGLE_CHANNEL_CLASS / MULTI_CHANNEL_CLASS /
+  CHANNELS_UNKNOWN. MULTI_CHANNEL_CLASS is never "better"
+- `paid_auction_observed` means only that an advertiser auction was
+  observably present. `null` is UNKNOWN, never "no auction"
+- `observed_across_multiple_providers` is deliberately literal: different
+  provider surfaces observe different things, they do not corroborate one
+  proposition
+- Geography is known only for search evidence and never inferred for
+  marketplace or content records from absent data
+- Identity-based counts, canonically ordered provenance (4D canonicalizes its
+  own lineage; `collect_listing_views` keeps its arrival-order semantics
+  unchanged), duplicate multiplicity preserved
+- No score: `value` is permanently `None`, state is
+  EVIDENCE_PRESENT_UNSCORED. No POS, ECS, or RED/YELLOW/GREEN
+- Dimension name is `preliminary_buyer_reach`, never `buyer_reach`, so it
+  cannot be wired into the legacy `ScoreDimensions.buyer_reach` weight
+
+### Milestone 4E — Competition opportunity (not started)
+- Formalize competition as evidence, distinct from 4D channel presence and
+  from 4A seller concentration. Not started
+
+### Milestone 4F — Audience interest formalization (not started)
+- Formalize the 3C preliminary audience-interest dimension into an evidence
+  derivation with the 4A/4B/4D posture. Not started
 
 ## Milestone 5 — Faceless content intelligence
 - YouTube creator baseline

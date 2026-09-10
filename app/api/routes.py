@@ -46,6 +46,7 @@ from app.services.preliminary_ranking import (
 )
 from app.services.public_content import run_public_content_research
 from app.services.public_content_features import ContentOutlier, PublicContentSummary
+from app.services.buyer_reach import BuyerReachProvenance, BuyerReachResult, ReachChannel
 from app.services.price_evidence import (
     PriceBand,
     PriceEvidenceFeatures,
@@ -1172,6 +1173,206 @@ class PriceEvidenceOut(BaseModel):
         )
 
 
+# --------------------------------------------------------------------------
+# Milestone 4D: Buyer Reach.
+#
+# CHANNEL evidence, never buyer evidence. Nothing here is a buyer count, an
+# audience size, a market size, or a conversion estimate, and no field is a
+# score. The permanent-UNKNOWN markers below are structural so the refusal is
+# visible in the payload rather than only in prose.
+# --------------------------------------------------------------------------
+
+
+class ReachEndpointOut(BaseModel):
+    # Whatever type the provider payload carried, uncoerced.
+    endpoint_id: str
+    url: str | None
+    # Observations of this endpoint, never buyers and never reach.
+    observation_count: int
+    evidence_ids: list[UUID]
+    originating_queries: list[str]
+    found_only_via_shared_queries: bool
+
+
+class ReachChannelOut(BaseModel):
+    channel_class: str
+    platform: str | None
+    # Four claim layers, never collapsed into one "reachable" verdict.
+    existence: str
+    relevance: str
+    relevance_basis: str
+    activity: str
+    distinct_endpoint_count: int
+    endpoint_sample: list[ReachEndpointOut]
+
+    # Marketplace. Deliberately NOT named distinct_seller_count: Milestone 4A
+    # uses that name for a different population (sellers carrying review-proxy
+    # evidence, not sellers with any relevant listing).
+    sellers_with_relevant_listing_count: int | None
+    distinct_listing_count: int | None
+    listings_without_seller_id: int | None
+    sellers_with_multiple_listings: int | None
+    established_listing_count: int | None
+    listings_without_created_at: int | None
+    excluded_physical_listing_count: int | None
+
+    # Public content. An observable content audience around the topic; never
+    # evidence that a viewer will buy.
+    creator_channels_with_relevant_video_count: int | None
+    distinct_video_count: int | None
+    videos_without_channel_id: int | None
+    channels_with_multiple_videos: int | None
+    recent_video_count: int | None
+    videos_without_published_at: int | None
+
+    # Search. paid_auction_observed=null means UNKNOWN (no keyword carried
+    # auction data), never "no auction". It means only that advertisers bid.
+    keywords_with_observed_volume: int | None
+    keywords_without_observed_volume: int | None
+    paid_auction_observed: bool | None
+    keywords_with_observed_auction: int | None
+    # Geography is known only for search evidence and never inferred elsewhere.
+    observed_locations: list[str]
+    observed_languages: list[str]
+
+    evidence_ids: list[UUID]
+    missing_reason: str | None
+
+    @classmethod
+    def from_channel(cls, c: ReachChannel) -> "ReachChannelOut":
+        return cls(
+            channel_class=c.channel_class.value,
+            platform=c.platform,
+            existence=c.existence.value,
+            relevance=c.relevance.value,
+            relevance_basis=c.relevance_basis,
+            activity=c.activity.value,
+            distinct_endpoint_count=c.distinct_endpoint_count,
+            endpoint_sample=[
+                ReachEndpointOut(
+                    endpoint_id=str(e.endpoint_id),
+                    url=e.url,
+                    observation_count=e.observation_count,
+                    evidence_ids=list(e.evidence_ids),
+                    originating_queries=list(e.originating_queries),
+                    found_only_via_shared_queries=e.found_only_via_shared_queries,
+                )
+                for e in c.endpoint_sample
+            ],
+            sellers_with_relevant_listing_count=c.sellers_with_relevant_listing_count,
+            distinct_listing_count=c.distinct_listing_count,
+            listings_without_seller_id=c.listings_without_seller_id,
+            sellers_with_multiple_listings=c.sellers_with_multiple_listings,
+            established_listing_count=c.established_listing_count,
+            listings_without_created_at=c.listings_without_created_at,
+            excluded_physical_listing_count=c.excluded_physical_listing_count,
+            creator_channels_with_relevant_video_count=(
+                c.creator_channels_with_relevant_video_count
+            ),
+            distinct_video_count=c.distinct_video_count,
+            videos_without_channel_id=c.videos_without_channel_id,
+            channels_with_multiple_videos=c.channels_with_multiple_videos,
+            recent_video_count=c.recent_video_count,
+            videos_without_published_at=c.videos_without_published_at,
+            keywords_with_observed_volume=c.keywords_with_observed_volume,
+            keywords_without_observed_volume=c.keywords_without_observed_volume,
+            paid_auction_observed=c.paid_auction_observed,
+            keywords_with_observed_auction=c.keywords_with_observed_auction,
+            observed_locations=list(c.observed_locations),
+            observed_languages=list(c.observed_languages),
+            evidence_ids=list(c.evidence_ids),
+            missing_reason=c.missing_reason,
+        )
+
+
+class BuyerReachProvenanceOut(BaseModel):
+    """Lineage, canonically ordered by Milestone 4D itself."""
+
+    candidate_id: UUID
+    research_run_id: UUID | None
+    evidence_ids: list[UUID]
+    providers: list[str]
+    platforms: list[str]
+    source_truth_classes: list[str]
+    originating_queries: list[str]
+    earliest_retrieved_at: datetime | None
+    latest_retrieved_at: datetime | None
+
+    @classmethod
+    def from_provenance(cls, p: BuyerReachProvenance) -> "BuyerReachProvenanceOut":
+        return cls(
+            candidate_id=p.candidate_id,
+            research_run_id=p.research_run_id,
+            evidence_ids=list(p.evidence_ids),
+            providers=list(p.providers),
+            platforms=list(p.platforms),
+            source_truth_classes=list(p.source_truth_classes),
+            originating_queries=list(p.originating_queries),
+            earliest_retrieved_at=p.earliest_retrieved_at,
+            latest_retrieved_at=p.latest_retrieved_at,
+        )
+
+
+class BuyerReachOut(BaseModel):
+    candidate_id: UUID
+    state: str
+    # Always null: no approved formula converts channels into a score.
+    value: float | None
+    # Evidence SHAPE only. MULTI_CHANNEL_CLASS is not "better".
+    pattern: str
+    channels: list[ReachChannelOut]
+    provenance: BuyerReachProvenanceOut
+
+    channel_classes_with_observed_evidence: int
+    # Literally what it says. NOT "corroborated": different provider surfaces
+    # observe different things, they do not verify one proposition.
+    observed_across_multiple_providers: bool
+    channels_found_only_via_shared_queries: int
+
+    # Permanent UNKNOWN markers.
+    buyer_count: str
+    audience_size: str
+    market_size: str
+    conversion_probability: str
+    addressability: str
+    guaranteed_distribution: str
+
+    missing_reason: str | None
+    limitations: list[str]
+    dimension_name: str
+    version: str
+    pattern_version: str
+
+    @classmethod
+    def from_result(cls, r: BuyerReachResult) -> "BuyerReachOut":
+        return cls(
+            candidate_id=r.candidate_id,
+            state=r.state.value,
+            value=r.value,
+            pattern=r.pattern.value,
+            channels=[ReachChannelOut.from_channel(c) for c in r.channels],
+            provenance=BuyerReachProvenanceOut.from_provenance(r.provenance),
+            channel_classes_with_observed_evidence=(
+                r.channel_classes_with_observed_evidence
+            ),
+            observed_across_multiple_providers=r.observed_across_multiple_providers,
+            channels_found_only_via_shared_queries=(
+                r.channels_found_only_via_shared_queries
+            ),
+            buyer_count=r.buyer_count.value,
+            audience_size=r.audience_size.value,
+            market_size=r.market_size.value,
+            conversion_probability=r.conversion_probability.value,
+            addressability=r.addressability.value,
+            guaranteed_distribution=r.guaranteed_distribution.value,
+            missing_reason=r.missing_reason,
+            limitations=list(r.limitations),
+            dimension_name=r.dimension_name,
+            version=r.version,
+            pattern_version=r.pattern_version,
+        )
+
+
 class DerivationOutcomeOut(BaseModel):
     derivation: str
     status: str
@@ -1200,6 +1401,8 @@ class PreliminaryResearchResponse(BaseModel):
     purchase_evidence: list[PurchaseEvidenceOut]
     # Milestone 4B: derived for the selected candidates only.
     price_evidence: list[PriceEvidenceOut]
+    # Milestone 4D: channel evidence for the selected candidates only.
+    buyer_reach: list[BuyerReachOut]
     derivations: list[DerivationOutcomeOut]
     orchestration_version: str
     dimensions_version: str
@@ -1299,6 +1502,11 @@ async def research_preliminary(
             PriceEvidenceOut.from_result(result.price_evidence[r.candidate_id])
             for r in ranked
             if r.candidate_id in result.price_evidence
+        ],
+        buyer_reach=[
+            BuyerReachOut.from_result(result.buyer_reach[r.candidate_id])
+            for r in ranked
+            if r.candidate_id in result.buyer_reach
         ],
         derivations=[DerivationOutcomeOut.from_outcome(d) for d in result.derivations],
         orchestration_version=result.orchestration_version,
