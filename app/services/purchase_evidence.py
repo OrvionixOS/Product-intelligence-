@@ -78,11 +78,13 @@ from uuid import UUID
 
 from app.domain.enums import TruthClass
 from app.domain.models import EvidenceItem
-from app.services.preliminary_dimensions import (
-    SIGNAL_LISTING_PRICE,
-    SIGNAL_REVIEW_PROXY,
-    DimensionState,
+from app.services.marketplace_listing_view import (
+    ListingView,
+    collect_listing_views,
+    quantile as _quantile,
+    weakest_truth_class,
 )
+from app.services.preliminary_dimensions import DimensionState
 
 PURCHASE_EVIDENCE_VERSION = "purchase_evidence_v1"
 PURCHASE_EVIDENCE_FEATURES_VERSION = "purchase_evidence_features_v1"
@@ -207,26 +209,6 @@ class MarketValidationPattern(str, Enum):
 
 
 @dataclass(slots=True, frozen=True)
-class ProxyListing:
-    """One deduplicated comparable listing, rebuilt from stored evidence.
-
-    `review_count` is populated only when the stored evidence record was
-    truth_class=OBSERVED. A listing whose review count was never looked up
-    keeps None and is counted as unknown — never as zero.
-    """
-
-    listing_id: str
-    seller_id: str | None
-    review_count: int | None
-    review_observed: bool
-    price_observed: bool
-    currency: str | None
-    created_at: datetime | None
-    is_digital: bool | None
-    evidence_ids: tuple[UUID, ...]
-
-
-@dataclass(slots=True, frozen=True)
 class PurchaseEvidenceProvenance:
     """Lineage of every derived feature, preserved intact."""
 
@@ -320,19 +302,6 @@ class PurchaseEvidenceResult:
 # ------------------------------------------------------------------ extraction
 
 
-def _quantile(sorted_values: list[float], q: float) -> float:
-    """Deterministic linear-interpolation quantile over a sorted list."""
-    if not sorted_values:
-        raise ValueError("empty")
-    if len(sorted_values) == 1:
-        return sorted_values[0]
-    position = q * (len(sorted_values) - 1)
-    low = int(position)
-    high = min(low + 1, len(sorted_values) - 1)
-    weight = position - low
-    return sorted_values[low] * (1 - weight) + sorted_values[high] * weight
-
-
 def _winsorized_mean(values: list[int], quantile: float = WINSORIZE_QUANTILE) -> float:
     """Mean after capping values at `quantile`, so one outlier cannot dominate."""
     ordered = sorted(float(v) for v in values)
@@ -340,99 +309,10 @@ def _winsorized_mean(values: list[int], quantile: float = WINSORIZE_QUANTILE) ->
     return round(sum(min(v, cap) for v in ordered) / len(ordered), 4)
 
 
-def _collect_listings(
-    evidence: list[EvidenceItem],
-) -> tuple[list[ProxyListing], int, tuple[UUID, ...]]:
-    """Rebuild deduplicated comparable listings from stored evidence.
-
-    One canonical listing per listing_id; every evidence record that
-    referenced it contributes its id to the lineage. Re-delivered copies of
-    the same observation are collapsed and counted, never double-counted.
-
-    The evidence record — not the payload snapshot — is the authority on
-    what was observed: a review count is read only from a record whose
-    truth_class is OBSERVED.
-    """
-    by_listing: dict[str, dict] = {}
-    order: list[str] = []
-    suppressed = 0
-    seen_records: set[tuple] = set()
-    all_ids: list[UUID] = []
-
-    for item in evidence:
-        if item.signal_type not in (SIGNAL_REVIEW_PROXY, SIGNAL_LISTING_PRICE):
-            continue
-        payload = item.raw_payload or {}
-        listing_id = payload.get("listing_id")
-        if not listing_id:
-            continue
-
-        # Collapse identical re-delivered observations of one measurement.
-        fingerprint = (item.signal_type, listing_id, item.raw_payload_hash, str(item.raw_value))
-        if item.raw_payload_hash is not None and fingerprint in seen_records:
-            suppressed += 1
-            continue
-        seen_records.add(fingerprint)
-        all_ids.append(item.id)
-
-        if listing_id not in by_listing:
-            by_listing[listing_id] = {
-                "seller_id": payload.get("seller_id"),
-                "review_count": None,
-                "review_observed": False,
-                "price_observed": False,
-                "currency": payload.get("currency"),
-                "created_at": payload.get("created_at"),
-                "is_digital": payload.get("is_digital"),
-                "evidence_ids": [],
-            }
-            order.append(listing_id)
-
-        record = by_listing[listing_id]
-        record["evidence_ids"].append(item.id)
-
-        if item.signal_type == SIGNAL_REVIEW_PROXY:
-            # OBSERVED is the only class that establishes a review count.
-            # UNKNOWN means "not looked up", which stays None, not zero.
-            if item.truth_class == TruthClass.OBSERVED and item.raw_value is not None:
-                record["review_count"] = int(item.raw_value)
-                record["review_observed"] = True
-        elif item.signal_type == SIGNAL_LISTING_PRICE:
-            if item.truth_class == TruthClass.OBSERVED and item.raw_value is not None:
-                record["price_observed"] = True
-
-    listings = [
-        ProxyListing(
-            listing_id=listing_id,
-            seller_id=by_listing[listing_id]["seller_id"],
-            review_count=by_listing[listing_id]["review_count"],
-            review_observed=by_listing[listing_id]["review_observed"],
-            price_observed=by_listing[listing_id]["price_observed"],
-            currency=by_listing[listing_id]["currency"],
-            created_at=_as_datetime(by_listing[listing_id]["created_at"]),
-            is_digital=by_listing[listing_id]["is_digital"],
-            evidence_ids=tuple(by_listing[listing_id]["evidence_ids"]),
-        )
-        for listing_id in order
-    ]
-    return listings, suppressed, tuple(all_ids)
-
-
-def _as_datetime(value) -> datetime | None:
-    if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            return None
-    return None
-
-
 def _build_provenance(
     candidate_id: UUID,
     evidence: list[EvidenceItem],
-    listings: list[ProxyListing],
+    listings: list[ListingView],
     evidence_ids: tuple[UUID, ...],
     suppressed: int,
 ) -> PurchaseEvidenceProvenance:
@@ -486,13 +366,13 @@ def _classify(features: PurchaseEvidenceFeatures) -> MarketValidationPattern:
 
 
 def _build_features(
-    listings: list[ProxyListing], now: datetime
+    listings: list[ListingView], now: datetime
 ) -> PurchaseEvidenceFeatures:
-    # Format relevance: a physical listing is not a comparable for a digital
-    # product. is_digital=None means the marketplace did not say, so the
-    # listing is kept and counted as unknown-relevance rather than dropped.
-    excluded_physical = sum(1 for listing in listings if listing.is_digital is False)
-    relevant = [listing for listing in listings if listing.is_digital is not False]
+    # Format relevance uses the shared canonical predicate, so Purchase
+    # Evidence and Price Evidence cannot disagree about which listings
+    # are comparables.
+    excluded_physical = sum(1 for listing in listings if not listing.is_format_relevant)
+    relevant = [listing for listing in listings if listing.is_format_relevant]
     unknown_format = sum(1 for listing in relevant if listing.is_digital is None)
 
     observed = [listing for listing in relevant if listing.review_observed]
@@ -549,7 +429,9 @@ def _build_features(
 
     return PurchaseEvidenceFeatures(
         relevant_comparable_count=len(relevant),
-        paid_comparable_count=sum(1 for listing in relevant if listing.price_observed),
+        # Shared definition: an OBSERVED price above zero. A $0 listing is
+        # a free competitor and is never counted as a paid comparable.
+        paid_comparable_count=sum(1 for listing in relevant if listing.is_paid_comparable),
         distinct_seller_count=len({l.seller_id for l in relevant if l.seller_id is not None}),
         excluded_physical_listing_count=excluded_physical,
         unknown_format_listing_count=unknown_format,
@@ -589,20 +471,12 @@ def extract_purchase_evidence(
     proxy into a sales or revenue figure.
     """
     reference_time = now or datetime.now(UTC)
-    listings, suppressed, evidence_ids = _collect_listings(evidence)
+    listings, suppressed, evidence_ids = collect_listing_views(evidence)
     provenance = _build_provenance(candidate_id, evidence, listings, evidence_ids, suppressed)
 
     contributing = [item for item in evidence if item.id in set(evidence_ids)]
     # Most conservative class among the sources that actually contributed.
-    basis: TruthClass | None = None
-    if contributing:
-        precedence = {
-            TruthClass.UNKNOWN: 3,
-            TruthClass.INFERRED: 2,
-            TruthClass.ESTIMATED: 1,
-            TruthClass.OBSERVED: 0,
-        }
-        basis = max((i.truth_class for i in contributing), key=lambda c: precedence[c])
+    basis = weakest_truth_class(contributing)
 
     if not listings:
         return PurchaseEvidenceResult(

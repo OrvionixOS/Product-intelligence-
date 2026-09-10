@@ -507,6 +507,102 @@ a change to `market_validation_pattern_v1` and should be versioned as one.
 - Listing longevity depends on creation dates the marketplace may not
   return; listings without one are counted, never assigned an assumed age.
 
+Milestone 4B (price evidence) is implemented:
+
+- A deterministic Price Evidence extractor
+  (`app/services/price_evidence.py`, `price_evidence_v1`) deriving
+  per-currency asking-price bands from marketplace PRICE evidence **already
+  collected** by 3A and resolved by 3C. No provider calls, no quota
+- Derived for the selected candidates and returned by
+  `POST /research/preliminary` under `price_evidence`. No new endpoint
+- Runs as a second independent `DerivationOutcome` behind the same failure
+  boundary as 4A: either derivation can fail without affecting the other,
+  the dimensions, or the ranking
+
+#### Asking price is not transaction price
+
+Every figure is a public **asking price** — the number a seller displays.
+Discounts, coupons, and sales are invisible in public listing data, so an
+asking price is never a verified transaction price, never willingness to
+pay, never revenue, and never an optimal or recommended price. **This
+milestone recommends no price.** `transaction_prices`, `willingness_to_pay`,
+and `recommended_price` are permanent `UNKNOWN` markers on every result.
+
+#### Currencies are never combined
+
+This repository has **no approved FX source**. Combining USD, EUR, and GBP
+into one distribution would fabricate comparisons, so bands are computed
+**per currency** and returned separately:
+
+- every observed currency gets its own band, with its own count, quartiles,
+  IQR, and dispersion;
+- **no currency is discarded because another is more common** — 3A's
+  dominant-currency collapse is deliberately not repeated here;
+- a paid listing the marketplace priced without naming a currency belongs to
+  no band and is reported as `paid_listings_without_currency`, never guessed
+  into one;
+- `cross_currency_comparison` is permanently `false`.
+
+#### Free listings are evidence, not absence
+
+A $0 listing is a free competitor and real OBSERVED evidence. It is counted
+as `free_listing_count`, reported as a proportion of priced listings, and
+**excluded from every paid-price statistic**. It is never missing data and
+never a paid comparable. A listing with no OBSERVED price is `UNKNOWN` —
+neither free nor zero.
+
+#### Bundles are not unit-normalized
+
+A $45 "50-template pack" and a $5 single printable are each one listing at
+one asking price. Public listing data carries no trustworthy structured unit
+quantity, so prices are **not** divided per item, template, or page. Both
+remain separate observed prices and the limitation is reported rather than
+hidden behind an invented divisor.
+
+#### Statistics per band
+
+Count, raw observed prices, min, P25, median, P75, P90, max, IQR,
+coefficient of variation, a trimmed mean, plus established-listing and
+purchase-proxy sub-population medians and seller counts.
+
+Statistics that need a sample are **withheld rather than faked**: P90 below
+10 paid comparables, the trimmed mean below 5, sub-population medians when
+no listing qualifies, and the coefficient of variation unless mathematically
+valid (at least two prices). Bands below 5 paid comparables are flagged
+`insufficient_evidence`. **Raw observed prices are preserved alongside every
+derived statistic**, so robust statistics never destroy the source
+observations.
+
+#### One shared definition of a paid comparable
+
+4A and 4B reconstruct listings through one shared helper
+(`app/services/marketplace_listing_view.py`), so they cannot silently
+disagree. The canonical definition: **a paid comparable is a listing whose
+price was OBSERVED and is greater than zero.**
+
+This fixed a real pre-existing inconsistency — 3A excluded $0 from paid
+comparables while 4A counted it as paid. 4A's `paid_comparable_count` now
+excludes $0 listings, which is a correctness fix aligning it with 3A and
+with the rule that a free listing is never a paid comparable.
+
+#### V1 assumptions
+
+4B reuses existing repository constants wherever one already covers the
+question (`MIN_PRICE_COMPARABLES` from 3A;
+`MIN_SAMPLE_FOR_WINSORIZED_MEAN`, `ESTABLISHED_LISTING_MIN_AGE_DAYS`, and
+`MIN_REVIEWS_FOR_PROXY` from 4A). It introduces exactly **one** new sample
+minimum, `MIN_SAMPLE_FOR_P90 = 10`, plus a 10% trim proportion — both
+unvalidated V1 assumptions appearing in no approved specification.
+
+#### Known limitations
+
+- An observed band describes the **sampled** listings, not the whole market:
+  marketplace search returns a provider-ordered sample.
+- Asking prices cannot reveal discounting behaviour or actual paid amounts.
+- Bundle size is unknown, so a band can mix incomparable units.
+- Sub-population medians (established, purchase-proxy) inherit 4A's
+  unvalidated age and review thresholds.
+
 ### Known technical debt
 
 - **Unbounded in-memory research store.** `ResearchStore` is a process-wide,

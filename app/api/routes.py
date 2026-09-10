@@ -46,6 +46,11 @@ from app.services.preliminary_ranking import (
 )
 from app.services.public_content import run_public_content_research
 from app.services.public_content_features import ContentOutlier, PublicContentSummary
+from app.services.price_evidence import (
+    PriceBand,
+    PriceEvidenceFeatures,
+    PriceEvidenceResult,
+)
 from app.services.purchase_evidence import (
     PurchaseEvidenceFeatures,
     PurchaseEvidenceProvenance,
@@ -919,6 +924,10 @@ class PurchaseEvidenceFeaturesOut(BaseModel):
 
 
 class PurchaseEvidenceProvenanceOut(BaseModel):
+    """Evidence lineage. Shared by Purchase Evidence and Price Evidence,
+    which reconstruct listings through the same helper and therefore carry
+    identical provenance shapes."""
+
     evidence_ids: list[UUID]
     listing_ids: list[str]
     providers: list[str]
@@ -1005,6 +1014,156 @@ class PurchaseEvidenceOut(BaseModel):
         )
 
 
+class PriceBandOut(BaseModel):
+    """Observed ASKING-price statistics for ONE currency.
+
+    Never compared against another currency: no approved FX source exists.
+    Every figure is an asking price, not a verified transaction price, and
+    none of it is a price recommendation.
+    """
+
+    currency: str
+    paid_listing_count: int
+    observed_prices: list[float]
+    min_paid_asking_price: float
+    p25_asking_price: float
+    median_asking_price: float
+    p75_asking_price: float
+    p90_asking_price: float | None
+    max_paid_asking_price: float
+    interquartile_range: float
+    coefficient_of_variation: float | None
+    trimmed_mean_asking_price: float | None
+    established_listing_median_asking_price: float | None
+    established_listing_count: int
+    purchase_proxy_median_asking_price: float | None
+    purchase_proxy_listing_count: int
+    listings_without_seller_id: int
+    distinct_seller_count: int
+    insufficient_evidence: bool
+    band_version: str
+
+    @classmethod
+    def from_band(cls, b: PriceBand) -> "PriceBandOut":
+        return cls(
+            currency=b.currency,
+            paid_listing_count=b.paid_listing_count,
+            observed_prices=list(b.observed_prices),
+            min_paid_asking_price=b.min_paid_asking_price,
+            p25_asking_price=b.p25_asking_price,
+            median_asking_price=b.median_asking_price,
+            p75_asking_price=b.p75_asking_price,
+            p90_asking_price=b.p90_asking_price,
+            max_paid_asking_price=b.max_paid_asking_price,
+            interquartile_range=b.interquartile_range,
+            coefficient_of_variation=b.coefficient_of_variation,
+            trimmed_mean_asking_price=b.trimmed_mean_asking_price,
+            established_listing_median_asking_price=b.established_listing_median_asking_price,
+            established_listing_count=b.established_listing_count,
+            purchase_proxy_median_asking_price=b.purchase_proxy_median_asking_price,
+            purchase_proxy_listing_count=b.purchase_proxy_listing_count,
+            listings_without_seller_id=b.listings_without_seller_id,
+            distinct_seller_count=b.distinct_seller_count,
+            insufficient_evidence=b.insufficient_evidence,
+            band_version=b.band_version,
+        )
+
+
+class PriceEvidenceFeaturesOut(BaseModel):
+    total_relevant_listings: int
+    listings_with_observed_price: int
+    listings_with_unknown_price: int
+    free_listing_count: int
+    paid_comparable_count: int
+    invalid_price_listing_count: int
+    paid_listings_without_currency: int
+    excluded_physical_listing_count: int
+    unknown_format_listing_count: int
+    free_proportion_of_priced_listings: float | None
+    currencies_observed: list[str]
+    bands: list[PriceBandOut]
+    multiple_currencies_present: bool
+    # Permanently false: bands are per-currency and never combined.
+    cross_currency_comparison: bool
+    features_version: str
+
+    @classmethod
+    def from_features(cls, f: PriceEvidenceFeatures) -> "PriceEvidenceFeaturesOut":
+        return cls(
+            total_relevant_listings=f.total_relevant_listings,
+            listings_with_observed_price=f.listings_with_observed_price,
+            listings_with_unknown_price=f.listings_with_unknown_price,
+            free_listing_count=f.free_listing_count,
+            paid_comparable_count=f.paid_comparable_count,
+            invalid_price_listing_count=f.invalid_price_listing_count,
+            paid_listings_without_currency=f.paid_listings_without_currency,
+            excluded_physical_listing_count=f.excluded_physical_listing_count,
+            unknown_format_listing_count=f.unknown_format_listing_count,
+            free_proportion_of_priced_listings=f.free_proportion_of_priced_listings,
+            currencies_observed=list(f.currencies_observed),
+            bands=[PriceBandOut.from_band(b) for b in f.bands],
+            multiple_currencies_present=f.multiple_currencies_present,
+            cross_currency_comparison=f.cross_currency_comparison,
+            features_version=f.features_version,
+        )
+
+
+class PriceEvidenceOut(BaseModel):
+    """Price Evidence for one candidate (Milestone 4B).
+
+    `value` is always null: no price-evidence formula is approved, so no
+    0-100 score is produced. `transaction_prices`, `willingness_to_pay`, and
+    `recommended_price` are always UNKNOWN — none is derivable from public
+    listing data and none is ever estimated.
+    """
+
+    candidate_id: UUID
+    state: str
+    value: float | None
+    basis: str
+    value_truth_class: str | None
+    features_truth_class: str | None
+    evidence_truth_basis: str | None
+    transaction_prices: str
+    willingness_to_pay: str
+    recommended_price: str
+    missing_reason: str | None
+    features: PriceEvidenceFeaturesOut | None
+    provenance: PurchaseEvidenceProvenanceOut
+    limitations: list[str]
+    dimension_name: str
+    version: str
+    band_version: str
+
+    @classmethod
+    def from_result(cls, r: PriceEvidenceResult) -> "PriceEvidenceOut":
+        return cls(
+            candidate_id=r.candidate_id,
+            state=r.state.value,
+            value=r.value,
+            basis=r.basis.value,
+            value_truth_class=r.value_truth_class.value if r.value_truth_class else None,
+            features_truth_class=(
+                r.features_truth_class.value if r.features_truth_class else None
+            ),
+            evidence_truth_basis=(
+                r.evidence_truth_basis.value if r.evidence_truth_basis else None
+            ),
+            transaction_prices=r.transaction_prices.value,
+            willingness_to_pay=r.willingness_to_pay.value,
+            recommended_price=r.recommended_price.value,
+            missing_reason=r.missing_reason,
+            features=(
+                PriceEvidenceFeaturesOut.from_features(r.features) if r.features else None
+            ),
+            provenance=PurchaseEvidenceProvenanceOut.from_provenance(r.provenance),
+            limitations=list(r.limitations),
+            dimension_name=r.dimension_name,
+            version=r.version,
+            band_version=r.band_version,
+        )
+
+
 class DerivationOutcomeOut(BaseModel):
     derivation: str
     status: str
@@ -1031,6 +1190,8 @@ class PreliminaryResearchResponse(BaseModel):
     criteria_order: list[str]
     # Milestone 4A: derived for the selected candidates only.
     purchase_evidence: list[PurchaseEvidenceOut]
+    # Milestone 4B: derived for the selected candidates only.
+    price_evidence: list[PriceEvidenceOut]
     derivations: list[DerivationOutcomeOut]
     orchestration_version: str
     dimensions_version: str
@@ -1125,6 +1286,11 @@ async def research_preliminary(
             PurchaseEvidenceOut.from_result(result.purchase_evidence[r.candidate_id])
             for r in ranked
             if r.candidate_id in result.purchase_evidence
+        ],
+        price_evidence=[
+            PriceEvidenceOut.from_result(result.price_evidence[r.candidate_id])
+            for r in ranked
+            if r.candidate_id in result.price_evidence
         ],
         derivations=[DerivationOutcomeOut.from_outcome(d) for d in result.derivations],
         orchestration_version=result.orchestration_version,
