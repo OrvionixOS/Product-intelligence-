@@ -780,16 +780,29 @@ def test_no_pos_ecs_or_classification_leaks_into_price_evidence():
     assert forbidden.isdisjoint(result.features.__slots__)
 
 
-def test_only_one_new_threshold_is_introduced_by_4b():
-    """4B reuses existing repository constants wherever one already exists."""
+def test_only_two_new_constants_are_introduced_by_4b():
+    """4B reuses existing repository constants wherever one already exists.
+
+    The two genuinely new values are both unvalidated V1 assumptions and
+    are labelled as such in source.
+    """
     from app.services import price_evidence as pe
 
     assert pe.MIN_PRICE_COMPARABLES == MIN_PRICE_COMPARABLES  # reused from 3A
     assert pe.MIN_SAMPLE_FOR_WINSORIZED_MEAN == MIN_SAMPLE_FOR_WINSORIZED_MEAN  # 4A
     assert pe.ESTABLISHED_LISTING_MIN_AGE_DAYS == 180  # 4A
     assert pe.MIN_REVIEWS_FOR_PROXY == 1  # 4A
-    # The only genuinely new sample minimum.
+    # The two genuinely new constants, and nothing else.
     assert pe.MIN_SAMPLE_FOR_P90 == 10
+    assert pe.TRIMMED_MEAN_PROPORTION == 0.1
+
+    import pathlib
+
+    source = pathlib.Path("app/services/price_evidence.py").read_text()
+    assert source.count("UNVALIDATED V1 ASSUMPTION") == 2, (
+        "every new constant must be labelled an unvalidated V1 assumption"
+    )
+    assert "Exactly two new constants" in source
 
 
 def test_no_fx_conversion_exists_anywhere_in_the_module():

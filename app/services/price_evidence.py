@@ -121,7 +121,8 @@ DIM_PRICE_EVIDENCE_DERIVED = "price_evidence"
 #   ESTABLISHED_LISTING_MIN_AGE_DAYS (4A) "established" listing age
 #   MIN_REVIEWS_FOR_PROXY            (4A) reviews that constitute proxy evidence
 #
-# Exactly one new threshold is introduced:
+# Exactly two new constants are introduced, both unvalidated V1
+# assumptions appearing in no approved specification:
 
 # P90 needs a real tail to mean anything. Below this many paid comparables
 # the 90th percentile is barely distinguishable from the maximum and would
