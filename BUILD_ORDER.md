@@ -144,8 +144,27 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   upgrade UNKNOWN or INFERRED to OBSERVED
 - 4A, 4B and 4C outputs are unchanged
 
+### Milestone 4D-0.1 — Deterministic provenance ordering (implemented)
+- Fixes a pre-existing nondeterminism in 4A and 4B: `provenance.evidence_ids`
+  and `provenance.listing_ids` were built in evidence arrival order, so an
+  equivalent evidence set produced a different provenance record depending on
+  arrival order. Measured on `89d28d59` before the fix: 100/100 shuffled
+  permutations differed for both extractors; only `provenance` moved, features
+  were byte-identical
+- `evidence_ids` and `ListingView.evidence_ids` are sorted; `listing_ids` is
+  ordered by `(str(value), type name)`, a total order across mixed types
+- `sorted()`, never `set()`: an id may legitimately repeat when a record
+  carries no payload hash and is therefore never collapsed
+- Never `str()`: identifier values keep their original type, only the ordering
+  is canonical. The type name breaks the tie `str()` alone leaves between
+  distinct values that render identically, such as 1 and "1"
+- The `views` list itself is deliberately left in arrival order, so feature
+  computation is untouched and feature invariance holds by construction
+- Only observable change: two existing provenance arrays are now sorted. Same
+  members, same multiplicity, no field, type, endpoint or schema change
+
 ### Milestone 4D — Buyer reach (not started)
-- Buyer reach, gated on 4D-0
+- Buyer reach, gated on 4D-0 and 4D-0.1
 
 ## Milestone 5 — Faceless content intelligence
 - YouTube creator baseline

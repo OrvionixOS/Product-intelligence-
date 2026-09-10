@@ -130,6 +130,24 @@ def collect_listing_views(
     One canonical listing per listing_id; every evidence record that
     referenced it contributes its id to the lineage. Re-delivered copies of
     the same observation are collapsed and counted, never double-counted.
+
+    Ordering (Milestone 4D-0.1)
+    ---------------------------
+
+    `ListingView.evidence_ids` is CANONICALLY SORTED, so a listing's lineage
+    is identical however the evidence arrived. Sorting preserves
+    multiplicity: an id may legitimately repeat, because a record carrying no
+    payload hash is never collapsed (nothing proves two such records describe
+    the same thing), and `set()` would silently discard that distinction
+    along with the suppression count that records it.
+
+    The `views` LIST and the returned `contributing_evidence_ids` tuple are
+    deliberately left in arrival order. The views list feeds feature
+    computation, so reordering it would widen a provenance fix into a change
+    of the derivation path; leaving it alone makes feature invariance true by
+    construction rather than by test. Consumers that expose lineage are
+    responsible for canonicalizing their own provenance tuples, exactly as
+    `purchase_evidence` and `price_evidence` do.
     """
     by_listing: dict[str, dict] = {}
     order: list[str] = []
@@ -193,7 +211,8 @@ def collect_listing_views(
             review_observed=by_listing[listing_id]["review_observed"],
             created_at=as_datetime(by_listing[listing_id]["created_at"]),
             is_digital=by_listing[listing_id]["is_digital"],
-            evidence_ids=tuple(by_listing[listing_id]["evidence_ids"]),
+            # Canonical order, multiplicity preserved: sorted(), never set().
+            evidence_ids=tuple(sorted(by_listing[listing_id]["evidence_ids"])),
         )
         for listing_id in order
     ]
