@@ -119,8 +119,33 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   classification and a specification cites only its own run
 - Produces no score of any kind, and no POS/ECS/RED-YELLOW-GREEN
 
+### Milestone 4D-0 — Query provenance (implemented)
+- Prerequisite for Buyer Reach, shipped as its own slice rather than hidden
+  inside it
+- Evidence records now retain the NORMALIZED query actually sent to the
+  provider (`originating_queries`), so a later milestone can say "this
+  observation came back from query X, generated for candidate Y" instead of
+  the much weaker "something associated with candidate Y"
+- Provider-request provenance, explicitly NOT the original raw candidate
+  wording, and never a phrase a buyer typed
+- Attribution is candidate-filtered: another candidate's query never lands on
+  this candidate's evidence merely because both queries returned the same
+  observation
+- `originating_query_shared` marks query overlap between candidates in one
+  run. Deliberately a boolean, not a count: a number would invite being read
+  as popularity, demand, reach, or market strength
+- Both fields live OUTSIDE `raw_payload` and are excluded from
+  `raw_payload_hash`. Observation identity, candidate association, and
+  retrieval provenance stay three separate concepts
+- `None` means provenance UNKNOWN and is never backfilled; `()` means known
+  to contain zero originating queries. SQL columns are nullable with no
+  default so historical NULL keeps meaning UNKNOWN
+- Provenance is metadata: it never changes a truth class and can never
+  upgrade UNKNOWN or INFERRED to OBSERVED
+- 4A, 4B and 4C outputs are unchanged
+
 ### Milestone 4D — Buyer reach (not started)
-- Buyer reach
+- Buyer reach, gated on 4D-0
 
 ## Milestone 5 — Faceless content intelligence
 - YouTube creator baseline

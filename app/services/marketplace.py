@@ -32,6 +32,7 @@ from app.providers.base import (
     MarketplaceProvider,
     ProviderError,
 )
+from app.services.query_provenance import resolve_provenance
 from app.services.marketplace_features import (
     MarketplaceCandidateSummary,
     summarize_marketplace,
@@ -151,6 +152,8 @@ def build_listing_evidence(
     provider: MarketplaceProvider,
     source_reference: str | None,
     reviews_looked_up: bool,
+    originating_queries: tuple[str, ...] | None = None,
+    originating_query_shared: bool | None = None,
 ) -> list[EvidenceItem]:
     """Immutable evidence for one (candidate, listing) pair.
 
@@ -178,6 +181,11 @@ def build_listing_evidence(
         normalization_version=NORMALIZATION_VERSION,
         raw_payload=payload,
         raw_payload_hash=payload_hash,
+        # Retrieval metadata only. Deliberately NOT part of `payload`, so it
+        # cannot alter payload_hash or any downstream dedupe, and it never
+        # affects the truth classes chosen below.
+        originating_queries=originating_queries,
+        originating_query_shared=originating_query_shared,
     )
 
     price_observed = listing.price is not None
@@ -308,15 +316,26 @@ async def run_marketplace_research(
 
     # Dedupe listings across queries by listing_id: one canonical observation
     # per listing, shared by every candidate whose query matched it.
+    #
+    # listing_to_queries records HOW each listing was found (Milestone 4D-0).
+    # It is captured here because this is the last point at which the query
+    # is still in scope; the evidence loop below iterates the deduplicated
+    # listings alone. Provenance is kept out of the payload and out of
+    # raw_payload_hash, so one listing found by two queries is still one
+    # listing with one hash.
     canonical: dict[str, MarketplaceListing] = {}
     listing_to_candidates: dict[str, list[UUID]] = {}
+    listing_to_queries: dict[str, list[str]] = {}
     listing_order: list[str] = []
     for query in requested:
         for listing in listings_by_query.get(query, []):
             if listing.listing_id not in canonical:
                 canonical[listing.listing_id] = listing
                 listing_to_candidates[listing.listing_id] = []
+                listing_to_queries[listing.listing_id] = []
                 listing_order.append(listing.listing_id)
+            if query not in listing_to_queries[listing.listing_id]:
+                listing_to_queries[listing.listing_id].append(query)
             for candidate_id in plan.query_to_candidates[query]:
                 if candidate_id not in listing_to_candidates[listing.listing_id]:
                     listing_to_candidates[listing.listing_id].append(candidate_id)
@@ -365,6 +384,14 @@ async def run_marketplace_research(
     for listing_id in listing_order:
         listing = canonical[listing_id]
         for candidate_id in listing_to_candidates[listing_id]:
+            # Candidate-filtered: another candidate's query never lands on
+            # this candidate's evidence just because both queries returned
+            # the same listing.
+            originating_queries, query_shared = resolve_provenance(
+                candidate_id,
+                listing_to_queries[listing_id],
+                plan.query_to_candidates,
+            )
             items = build_listing_evidence(
                 candidate_id,
                 run_id,
@@ -373,6 +400,8 @@ async def run_marketplace_research(
                 provider,
                 source_reference,
                 reviews_looked_up=listing_id in reviews_fetched,
+                originating_queries=originating_queries,
+                originating_query_shared=query_shared,
             )
             evidence_items.extend(items)
             evidence_ids[candidate_id].extend(item.id for item in items)

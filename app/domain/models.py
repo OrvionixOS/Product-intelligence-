@@ -80,6 +80,42 @@ class EvidenceItem(BaseModel):
     normalization_version: str = "v0.1"
     raw_payload: dict[str, Any] | None = None
     raw_payload_hash: str | None = None
+    # --- query provenance (Milestone 4D-0) -------------------------------
+    #
+    # How this observation was FOUND, kept strictly apart from what was
+    # observed. These fields live OUTSIDE raw_payload and are deliberately
+    # excluded from raw_payload_hash: the hash is the identity of the
+    # observation itself, so the same listing reached by two different
+    # queries must still hash identically. Recording provenance inside the
+    # payload would break every downstream deduplicator.
+    #
+    # `originating_queries` holds the NORMALIZED query strings actually sent
+    # to the provider — provider-request provenance, not necessarily the
+    # user's or Milestone 1's original raw wording, which is never stored
+    # here. Entries are canonicalized, deduplicated and sorted, so the value
+    # is deterministic regardless of the order results arrived in.
+    #
+    # Attribution is candidate-filtered: only queries generated for THIS
+    # candidate appear, even when another candidate's query returned the
+    # same observation.
+    #
+    #   None  provenance UNKNOWN — evidence recorded before this milestone,
+    #         or by a path that does not capture it. Never reconstructed and
+    #         never inferred from candidate text.
+    #   ()    provenance known, and known to contain zero originating
+    #         queries. This is not the same as UNKNOWN.
+    #
+    # Provenance is metadata about retrieval. It never changes truth_class:
+    # knowing how a record was found says nothing about how well it is
+    # supported, so it can never upgrade UNKNOWN or INFERRED to OBSERVED.
+    originating_queries: tuple[str, ...] | None = None
+    # True when at least one of this candidate's originating queries was also
+    # generated for another candidate in the same research run. A shared
+    # query must never read as evidence that it was uniquely generated for
+    # this candidate. Deliberately a boolean, not a count: a number here
+    # could later be misread as popularity, demand, reach, or market
+    # strength. None means UNKNOWN, matching originating_queries.
+    originating_query_shared: bool | None = None
 
 
 class EvidenceSnapshot(BaseModel):

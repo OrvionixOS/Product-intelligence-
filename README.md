@@ -731,7 +731,82 @@ number, change the format decision, or convert an assumption into a finding.
 Proposed prose is validated against forbidden market claims and rejected if
 it smuggles one in.
 
+Milestone 4D-0 (query provenance) is implemented:
+
+- Evidence records retain the query that produced them
+  (`app/services/query_provenance.py`, `query_provenance_v1`), closing a gap
+  that would otherwise have forced Milestone 4D to guess why an observation
+  was attached to a candidate
+
+#### Three concepts, kept separate
+
+| Concept | Where it lives |
+| --- | --- |
+| What was observed | `raw_payload` / `raw_payload_hash` |
+| Which candidate it belongs to | `candidate_id`, `research_run_id` |
+| **How it was found** | `originating_queries` |
+
+`originating_queries` and `originating_query_shared` live **outside**
+`raw_payload` and are excluded from `raw_payload_hash`. That is not a
+stylistic choice: the hash is the identity of the observation, and every
+downstream deduplicator keys on it. One listing reached by two different
+queries is still one listing and must still hash identically — embedding
+provenance in the payload would split that identity and inflate every
+derived count.
+
+#### Provider-request provenance, not the buyer's words
+
+The stored string is the NORMALIZED query actually sent to the provider —
+lowercased, whitespace-collapsed. It is not the original raw candidate
+wording, and it is **not** a phrase any buyer typed. Nothing reconstructs a
+query from candidate text.
+
+#### Candidate-filtered attribution
+
+One query is often generated for several candidates, and one observation is
+often returned by several queries. Only queries generated for *this*
+candidate appear on *this* candidate's evidence.
+`originating_query_shared` reports whether any of them was also generated
+for another candidate in the same run, so a shared query can never read as
+evidence that it was uniquely generated for this candidate. It is a boolean
+rather than a count on purpose: a number would invite being read as
+popularity, demand, reach, or market strength, none of which query overlap
+measures.
+
+#### Unknown is not empty
+
+`None` means provenance is UNKNOWN — evidence recorded before this
+milestone, or by a path that does not capture it. `()` means provenance is
+known and contains zero originating queries. These are different facts. The
+SQL columns are nullable **with no default** precisely so a historical NULL
+keeps meaning UNKNOWN; a `not null default '[]'` would silently reinterpret
+history as "known to have zero queries". Nothing is backfilled.
+
+#### Metadata, never support
+
+Knowing how a record was found says nothing about how well it is evidenced.
+Provenance never changes a truth class and can never upgrade UNKNOWN or
+INFERRED to OBSERVED. A listing with no observed price still carries an
+UNKNOWN price record, provenance attached.
+
+#### Additive API change
+
+The three snapshot endpoints (`GET /research/search-demand/snapshots/{id}`,
+`GET /research/marketplace/snapshots/{id}`,
+`GET /research/public-content/snapshots/{id}`) now expose two additional
+optional fields on each element of `evidence[]`: `originating_queries` and
+`originating_query_shared`. Both may be `null`. No existing field is
+removed, renamed, or retyped, and 4A/4B/4C outputs are unchanged.
+
 ### Known technical debt
+
+- **4A and 4B provenance tuples are order-dependent.** `extract_purchase_evidence`
+  and `extract_price_evidence` build `provenance.evidence_ids` in evidence
+  arrival order, so shuffling an equivalent evidence set yields an equal-as-a-set
+  but unequal-as-a-tuple result. Measured on `e25795a5` before Milestone 4D-0:
+  50/50 shuffles differ. Milestone 4C made its own output order-invariant; 4A and
+  4B were never given the same treatment. 4D-0 deliberately does **not** fix this,
+  because changing it would change 4A/4B output. Worth a small dedicated slice.
 
 - **Unbounded in-memory research store and its indexes.** `ResearchStore` is
   a process-wide, append-only, in-memory store with no eviction, so snapshots
