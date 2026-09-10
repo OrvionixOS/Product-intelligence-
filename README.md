@@ -654,6 +654,15 @@ empirically proven model of buyer behaviour**, and no token is shared
 between two jobs. When signals do not separate the leading jobs, the result
 is UNKNOWN and the tie is reported — the conservative answer, not a guess.
 
+Matching is literal and word-boundary anchored: there is **no stemming or
+lemmatization**, so an inflected form such as `calculators` does not match
+the token `calculator`, and a genuine signal can be missed. The error runs
+in the safe direction — a missed token lowers a job's score and pushes the
+result toward UNKNOWN or toward a weaker claim class, never toward a
+stronger claim than the evidence supports. Adding stemming would change
+which candidates classify at all, so it is deferred to a calibrated
+revision of the taxonomy rather than patched in.
+
 #### Missing evidence stays missing
 
 No evidence produces a `MISSING` specification with a `missing_reason`, not
@@ -673,6 +682,23 @@ product name or core promise, with the basis naming the pattern that was
 matched. Matching is done on an NFKC-normalized, invisible-character-stripped,
 homoglyph-folded copy of the text, so a look-alike character cannot smuggle a
 claim past the filter.
+
+#### The guardrails are V1 assumptions, not validated models
+
+The protections described above are deliberate, documented guesses. The
+stopword list, the forbidden-claim vocabulary, the Unicode normalization
+and homoglyph-folding table, and the token and format mappings they support
+are **unvalidated V1 assumptions**, arrived at by inspection and by
+adversarial probing of this system — not by measuring buyers, and not from
+any empirically validated model of market or natural language.
+
+Concretely: the stopword list is not a linguistic corpus, the forbidden
+vocabulary is not an exhaustive enumeration of every way a text can assert
+an unsupported market claim, and the homoglyph table covers the confusable
+characters that were tested rather than all of Unicode. They are a floor,
+not a proof. Each is versioned so a later calibration is traceable, and
+none should be cited as evidence that the system cannot state an
+unsupported claim — only that the known ways of doing so are blocked.
 
 #### Evidence reads are scoped to one research run
 
@@ -707,12 +733,18 @@ it smuggles one in.
 
 ### Known technical debt
 
-- **Unbounded in-memory research store.** `ResearchStore` is a process-wide,
-  append-only, in-memory store with no eviction, so snapshots and evidence
-  accumulate for the life of the process. Milestone 3C adds three snapshots
-  per preliminary run rather than one, which reaches the limit sooner.
-  Deferred deliberately: it is resolved by the persistence milestone that
-  implements `schema.sql`, not by patching the in-memory seam.
+- **Unbounded in-memory research store and its indexes.** `ResearchStore` is
+  a process-wide, append-only, in-memory store with no eviction, so snapshots
+  and evidence accumulate for the life of the process. Milestone 3C adds three
+  snapshots per preliminary run rather than one, which reaches the limit
+  sooner. Milestone 4C adds a second unbounded structure alongside the
+  existing snapshot index: `_evidence_by_candidate`, which grows with every
+  stored record and is never pruned. Both the store and **both** of its
+  indexes are in-memory only — nothing survives a process restart, and
+  reading a candidate's history across runs relies entirely on that
+  process-local index. Deferred deliberately: the store and its indexes must
+  be replaced or redesigned by the persistence milestone that implements
+  `schema.sql`, not patched in the in-memory seam.
 
 ## Run locally
 
