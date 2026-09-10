@@ -329,6 +329,84 @@ def test_capability_ran_and_found_nothing_is_its_own_state():
     assert result.missing_reason == "no_channel_evidence_returned_for_candidate"
 
 
+def test_missing_reason_helpers_agree_for_every_capability_outcome():
+    """The two helpers encode related semantics in different layers.
+
+    `_missing_reasons` answers "why does this DIMENSION have no evidence" for
+    3C's profile builder; `_capability_missing_reasons` answers the same
+    question keyed by CAPABILITY for Buyer Reach. They read the same outcomes
+    and must never drift apart — if they did, 3C and 4D would disagree about
+    whether a capability failed or simply found nothing.
+    """
+    from app.services.preliminary_dimensions import (
+        DIM_AUDIENCE_INTEREST,
+        DIM_PRICE_EVIDENCE,
+        DIM_SEARCH_DEMAND,
+    )
+    from app.services.research_orchestration import (
+        CAPABILITY_MARKETPLACE,
+        CAPABILITY_PUBLIC_CONTENT,
+        CAPABILITY_SEARCH_DEMAND,
+        MISSING_NO_EVIDENCE_FOR_CANDIDATE,
+        STATUS_NOT_REQUESTED,
+        STATUS_PROVIDER_FAILED,
+        STATUS_UNEXPECTED_PROVIDER_ERROR,
+        CapabilityOutcome,
+        _capability_missing_reasons,
+        _missing_reasons,
+    )
+
+    dimension_of = {
+        CAPABILITY_SEARCH_DEMAND: DIM_SEARCH_DEMAND,
+        CAPABILITY_MARKETPLACE: DIM_PRICE_EVIDENCE,
+        CAPABILITY_PUBLIC_CONTENT: DIM_AUDIENCE_INTEREST,
+    }
+    statuses = (
+        STATUS_NOT_REQUESTED,
+        STATUS_PROVIDER_FAILED,
+        STATUS_UNEXPECTED_PROVIDER_ERROR,
+        "COMPLETE",
+        "PARTIAL",
+    )
+    for capability, dimension in dimension_of.items():
+        for status in statuses:
+            outcomes = [CapabilityOutcome(capability=capability, status=status)]
+
+            # The capability produced nothing: both helpers must name the
+            # same reason.
+            by_capability = _capability_missing_reasons({capability}, outcomes)
+            by_dimension = _missing_reasons({capability}, outcomes)
+            assert by_capability[capability] == by_dimension[dimension], (
+                capability,
+                status,
+            )
+
+            # The capability produced evidence: the capability-keyed helper
+            # stays silent, the dimension-keyed one reports the per-candidate
+            # absence. Different questions, both correct.
+            assert _capability_missing_reasons(set(), outcomes) == {}
+            assert (
+                _missing_reasons(set(), outcomes)[dimension]
+                == MISSING_NO_EVIDENCE_FOR_CANDIDATE
+            )
+
+
+def test_absent_field_within_present_evidence_is_unknown_not_zero():
+    """The fifth missing case: evidence exists, one field does not.
+
+    A listing with no seller_id must not silently become "zero sellers" —
+    it is one listing whose storefront is unknown.
+    """
+    result = reach([listing_record("L1", seller_id=None)])
+    marketplace = channel(result, ChannelClass.MARKETPLACE_STOREFRONT)
+    assert marketplace.distinct_listing_count == 1
+    assert marketplace.listings_without_seller_id == 1
+    assert marketplace.sellers_with_relevant_listing_count == 0
+    # The channel exists as evidence but has no observable endpoint.
+    assert marketplace.existence == ClaimState.UNKNOWN
+    assert marketplace.missing_reason is None  # the capability did run
+
+
 def test_marketplace_unavailable_while_content_exists():
     result = reach([video_record()], missing_reasons={MARKETPLACE: FAILED})
     assert result.state == DimensionState.EVIDENCE_PRESENT_UNSCORED
