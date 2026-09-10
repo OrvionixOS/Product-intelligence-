@@ -91,6 +91,21 @@ create table if not exists evidence_items (
   provider_version text,
   normalization_version text not null default 'v0.1',
   raw_payload_hash text,
+  -- Query provenance (Milestone 4D-0): HOW this observation was found, kept
+  -- apart from what was observed (raw_payload_hash) and from which candidate
+  -- it belongs to (candidate_id). Normalized provider-request strings, not
+  -- the original raw candidate wording.
+  --
+  -- Both columns are NULLABLE WITH NO DEFAULT on purpose. NULL means
+  -- provenance is UNKNOWN, which is what every row written before this
+  -- milestone genuinely is. A 'not null default []' would silently reinterpret
+  -- that history as "known to have zero originating queries" — a different
+  -- and false statement. Historical rows are never backfilled.
+  originating_queries jsonb,
+  -- True when at least one of this candidate's originating queries was also
+  -- generated for another candidate in the same run. Boolean, not a count: a
+  -- number here would invite reading query overlap as popularity or demand.
+  originating_query_shared boolean,
   created_at timestamptz not null default now()
 );
 

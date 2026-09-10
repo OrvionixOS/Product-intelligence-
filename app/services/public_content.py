@@ -35,6 +35,7 @@ from app.providers.base import (
     PublicContentProvider,
     VideoObservation,
 )
+from app.services.query_provenance import resolve_provenance
 from app.services.public_content_features import (
     PublicContentSummary,
     engagement_rate,
@@ -160,6 +161,8 @@ def build_video_evidence(
     video: VideoObservation,
     provider: PublicContentProvider,
     source_reference: str | None,
+    originating_queries: tuple[str, ...] | None = None,
+    originating_query_shared: bool | None = None,
 ) -> list[EvidenceItem]:
     """Immutable evidence for one (candidate, video) pair.
 
@@ -189,6 +192,11 @@ def build_video_evidence(
         normalization_version=NORMALIZATION_VERSION,
         raw_payload=payload,
         raw_payload_hash=payload_hash,
+        # Retrieval metadata only. Outside `payload`, so it cannot alter
+        # payload_hash or any downstream dedupe, and it never affects the
+        # truth classes chosen below.
+        originating_queries=originating_queries,
+        originating_query_shared=originating_query_shared,
     )
 
     views_observed = video.view_count is not None
@@ -338,15 +346,24 @@ async def run_public_content_research(
 
     # Dedupe videos across queries by video_id: one canonical observation per
     # video, shared by every candidate whose query matched it.
+    #
+    # video_to_queries records HOW each video was found (Milestone 4D-0),
+    # captured here because the evidence loop below iterates deduplicated
+    # videos alone and the query is no longer in scope there. Provenance
+    # stays out of the payload and out of raw_payload_hash.
     canonical: dict[str, VideoObservation] = {}
     video_to_candidates: dict[str, list[UUID]] = {}
+    video_to_queries: dict[str, list[str]] = {}
     video_order: list[str] = []
     for query in requested:
         for video in videos_by_query.get(query, []):
             if video.video_id not in canonical:
                 canonical[video.video_id] = video
                 video_to_candidates[video.video_id] = []
+                video_to_queries[video.video_id] = []
                 video_order.append(video.video_id)
+            if query not in video_to_queries[video.video_id]:
+                video_to_queries[video.video_id].append(query)
             for candidate_id in plan.query_to_candidates[query]:
                 if candidate_id not in video_to_candidates[video.video_id]:
                     video_to_candidates[video.video_id].append(candidate_id)
@@ -430,8 +447,21 @@ async def run_public_content_research(
     for video_id in video_order:
         video = canonical[video_id]
         for candidate_id in video_to_candidates[video_id]:
+            # Candidate-filtered: another candidate's query never lands on
+            # this candidate's evidence just because both queries returned
+            # the same video.
+            originating_queries, query_shared = resolve_provenance(
+                candidate_id, video_to_queries[video_id], plan.query_to_candidates
+            )
             items = build_video_evidence(
-                candidate_id, run_id, snapshot_id, video, provider, source_reference
+                candidate_id,
+                run_id,
+                snapshot_id,
+                video,
+                provider,
+                source_reference,
+                originating_queries=originating_queries,
+                originating_query_shared=query_shared,
             )
             evidence_items.extend(items)
             evidence_ids[candidate_id].extend(item.id for item in items)

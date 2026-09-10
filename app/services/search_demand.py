@@ -26,6 +26,7 @@ from app.providers.base import (
     SearchDemandBatchResult,
     SearchDemandProvider,
 )
+from app.services.query_provenance import resolve_provenance
 from app.services.search_demand_features import (
     SearchDemandSummary,
     search_demand_dimension,
@@ -131,6 +132,8 @@ def build_evidence_item(
     batch: SearchDemandBatchResult,
     location: str,
     language: str,
+    originating_queries: tuple[str, ...] | None = None,
+    originating_query_shared: bool | None = None,
 ) -> EvidenceItem:
     payload = asdict(metrics)
     observed = metrics.search_volume is not None
@@ -159,6 +162,10 @@ def build_evidence_item(
         normalization_version=NORMALIZATION_VERSION,
         raw_payload=payload,
         raw_payload_hash=_payload_hash(payload),
+        # Retrieval metadata only; outside the payload and therefore outside
+        # the hash, and never affecting the truth class chosen above.
+        originating_queries=originating_queries,
+        originating_query_shared=originating_query_shared,
     )
 
 
@@ -269,8 +276,24 @@ async def run_search_demand_research(
     evidence_items: list[EvidenceItem] = []
     for keyword, (metrics, batch) in metrics_by_keyword.items():
         for candidate_id in plan.keyword_to_candidates[keyword]:
+            # For search demand the keyword IS the request, so provenance is
+            # the single keyword that was sent. It already appears inside the
+            # payload as the measured subject and must stay there: removing
+            # it would change raw_payload_hash. Recording it here as well
+            # keeps the provenance field uniform across capabilities.
+            originating_queries, query_shared = resolve_provenance(
+                candidate_id, [keyword], plan.keyword_to_candidates
+            )
             item = build_evidence_item(
-                candidate_id, run_id, snapshot_id, metrics, batch, location, language
+                candidate_id,
+                run_id,
+                snapshot_id,
+                metrics,
+                batch,
+                location,
+                language,
+                originating_queries=originating_queries,
+                originating_query_shared=query_shared,
             )
             evidence_items.append(item)
             evidence_ids[candidate_id].append(item.id)
