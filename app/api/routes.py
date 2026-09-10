@@ -50,11 +50,19 @@ from app.services.price_evidence import (
     PriceBand,
     PriceEvidenceFeatures,
     PriceEvidenceResult,
+    extract_price_evidence,
+)
+from app.services.product_specification import (
+    EvidenceOwnershipError,
+    ProductSpecification,
+    SpecField,
+    generate_product_specification,
 )
 from app.services.purchase_evidence import (
     PurchaseEvidenceFeatures,
     PurchaseEvidenceProvenance,
     PurchaseEvidenceResult,
+    extract_purchase_evidence,
 )
 from app.services.research_orchestration import (
     CAPABILITY_MARKETPLACE,
@@ -1339,3 +1347,293 @@ def score() -> None:
     the only outcome is 410.
     """
     raise HTTPException(status_code=410, detail=SCORING_REMOVED_DETAIL)
+
+
+# --------------------------------------------------------------------------
+# Milestone 4C: product specification, on demand, for ONE candidate.
+#
+# Additive and opt-in. Nothing here runs during /research/preliminary: a
+# specification is generated only when a caller selects a candidate and asks
+# for one. It derives from evidence that already exists in the store; it
+# makes no provider calls, calls no LLM, and produces no score.
+# --------------------------------------------------------------------------
+
+
+class ProductSpecificationRequest(BaseModel):
+    """Ask for a specification for one candidate.
+
+    Either supply `research_run_id` + `candidate_id` to use stored evidence,
+    or supply `candidate` (with optional inline `evidence`) directly.
+    """
+
+    research_run_id: UUID | None = None
+    candidate_id: UUID | None = None
+    candidate: Candidate | None = None
+    evidence: list[EvidenceItem] | None = None
+
+    @model_validator(mode="after")
+    def check_selection(self) -> "ProductSpecificationRequest":
+        if self.candidate is None and (
+            self.research_run_id is None or self.candidate_id is None
+        ):
+            raise ValueError(
+                "supply either 'candidate', or both 'research_run_id' and 'candidate_id'"
+            )
+        return self
+
+
+class SpecFieldOut(BaseModel):
+    value: str | None
+    claim_class: str
+    basis: str
+    evidence_ids: list[UUID]
+    signal_types: list[str]
+
+    @classmethod
+    def from_field(cls, f: SpecField) -> "SpecFieldOut":
+        return cls(
+            value=f.value,
+            claim_class=f.claim_class.value,
+            basis=f.basis,
+            evidence_ids=list(f.evidence_ids),
+            signal_types=list(f.signal_types),
+        )
+
+
+class ProductModuleOut(BaseModel):
+    name: str
+    purpose: str
+    claim_class: str
+
+
+class FormatRecommendationOut(BaseModel):
+    # The conceptually best format for the job. ALWAYS an assumption, and
+    # possibly something this system cannot build.
+    ideal_format: str | None
+    ideal_claim_class: str
+    outside_v1_build_capability: bool
+    # What V1 can actually produce, from Milestone 1's approved formats.
+    buildable_v1_format: str | None
+    buildable_claim_class: str
+    rationale: str
+    driven_by_job: str
+    observed_dominant_format: str | None
+    diverges_from_observed_market: bool
+    selection_version: str
+
+
+class PriceEvidenceReferenceOut(BaseModel):
+    """A citation of Milestone 4B. Never a price recommendation."""
+
+    available: bool
+    state: str | None
+    currencies: list[str]
+    observed_asking_bands: list[dict]
+    free_listing_count: int | None
+    price_evidence_version: str | None
+    limitations: list[str]
+    note: str
+
+
+class EvidenceConflictOut(BaseModel):
+    topic: str
+    description: str
+    resolution: str
+
+
+class JobClassificationOut(BaseModel):
+    job: str
+    claim_class: str
+    matched_tokens: list[str]
+    scores: list[dict]
+    basis: str
+    evidence_ids: list[UUID]
+    signal_types: list[str]
+    taxonomy_version: str
+
+
+class ProductSpecificationOut(BaseModel):
+    candidate_id: UUID
+    research_run_id: UUID | None
+    state: str
+    product_name: SpecFieldOut
+    target_buyer: SpecFieldOut
+    buyer_job: SpecFieldOut
+    job_classification: JobClassificationOut
+    format_recommendation: FormatRecommendationOut | None
+    core_promise: SpecFieldOut
+    structure: list[ProductModuleOut]
+    required_assets: list[str]
+    differentiation_opportunities: list[SpecFieldOut]
+    observed_competitor_patterns: list[SpecFieldOut]
+    price_evidence_reference: PriceEvidenceReferenceOut
+    supporting_evidence_ids: list[UUID]
+    assumptions: list[str]
+    unknowns: list[str]
+    conflicts: list[EvidenceConflictOut]
+    limitations: list[str]
+    insufficient_evidence: bool
+    missing_reason: str | None
+    version: str
+    job_taxonomy_version: str
+    format_selection_version: str
+
+    @classmethod
+    def from_specification(cls, s: ProductSpecification) -> "ProductSpecificationOut":
+        rec = s.format_recommendation
+        price = s.price_evidence_reference
+        return cls(
+            candidate_id=s.candidate_id,
+            research_run_id=s.research_run_id,
+            state=s.state.value,
+            product_name=SpecFieldOut.from_field(s.product_name),
+            target_buyer=SpecFieldOut.from_field(s.target_buyer),
+            buyer_job=SpecFieldOut.from_field(s.buyer_job),
+            job_classification=JobClassificationOut(
+                job=s.job_classification.job.value,
+                claim_class=s.job_classification.claim_class.value,
+                matched_tokens=list(s.job_classification.matched_tokens),
+                scores=[{"job": j, "matches": n} for j, n in s.job_classification.scores],
+                basis=s.job_classification.basis,
+                evidence_ids=list(s.job_classification.evidence_ids),
+                signal_types=list(s.job_classification.signal_types),
+                taxonomy_version=s.job_classification.taxonomy_version,
+            ),
+            format_recommendation=(
+                None
+                if rec is None
+                else FormatRecommendationOut(
+                    ideal_format=rec.ideal_format.value if rec.ideal_format else None,
+                    ideal_claim_class=rec.ideal_claim_class.value,
+                    outside_v1_build_capability=rec.outside_v1_build_capability,
+                    buildable_v1_format=(
+                        rec.buildable_v1_format.value if rec.buildable_v1_format else None
+                    ),
+                    buildable_claim_class=rec.buildable_claim_class.value,
+                    rationale=rec.rationale,
+                    driven_by_job=rec.driven_by_job.value,
+                    observed_dominant_format=rec.observed_dominant_format,
+                    diverges_from_observed_market=rec.diverges_from_observed_market,
+                    selection_version=rec.selection_version,
+                )
+            ),
+            core_promise=SpecFieldOut.from_field(s.core_promise),
+            structure=[
+                ProductModuleOut(
+                    name=m.name, purpose=m.purpose, claim_class=m.claim_class.value
+                )
+                for m in s.structure
+            ],
+            required_assets=list(s.required_assets),
+            differentiation_opportunities=[
+                SpecFieldOut.from_field(f) for f in s.differentiation_opportunities
+            ],
+            observed_competitor_patterns=[
+                SpecFieldOut.from_field(f) for f in s.observed_competitor_patterns
+            ],
+            price_evidence_reference=PriceEvidenceReferenceOut(
+                available=price.available,
+                state=price.state,
+                currencies=list(price.currencies),
+                observed_asking_bands=[
+                    {
+                        "currency": currency,
+                        "paid_listing_count": count,
+                        # Explicitly ASKING prices. Not transaction prices.
+                        "min_paid_asking_price": low,
+                        "median_asking_price": median,
+                        "max_paid_asking_price": high,
+                        "insufficient_evidence": insufficient,
+                    }
+                    for currency, count, low, median, high, insufficient in (
+                        price.observed_asking_bands
+                    )
+                ],
+                free_listing_count=price.free_listing_count,
+                price_evidence_version=price.price_evidence_version,
+                limitations=list(price.limitations),
+                note=price.note,
+            ),
+            supporting_evidence_ids=list(s.supporting_evidence_ids),
+            assumptions=list(s.assumptions),
+            unknowns=list(s.unknowns),
+            conflicts=[
+                EvidenceConflictOut(
+                    topic=c.topic, description=c.description, resolution=c.resolution
+                )
+                for c in s.conflicts
+            ],
+            limitations=list(s.limitations),
+            insufficient_evidence=s.insufficient_evidence,
+            missing_reason=s.missing_reason,
+            version=s.version,
+            job_taxonomy_version=s.job_taxonomy_version,
+            format_selection_version=s.format_selection_version,
+        )
+
+
+class ProductSpecificationResponse(BaseModel):
+    specification: ProductSpecificationOut
+
+
+@router.post("/product/specification", response_model=ProductSpecificationResponse)
+def product_specification(
+    request: ProductSpecificationRequest,
+    store: ResearchStore = Depends(get_research_store),
+) -> ProductSpecificationResponse:
+    """Generate a product specification for one selected candidate.
+
+    Deterministic: no provider calls, no LLM, no score, and no fabricated
+    demand. Evidence that does not exist stays UNKNOWN or MISSING.
+    """
+    if request.candidate is not None:
+        candidate = request.candidate
+        evidence = list(request.evidence or [])
+        # The run stamp is taken from the evidence itself, never from the
+        # request: a caller must not be able to label a specification with a
+        # research run its evidence did not come from.
+        runs = {item.research_run_id for item in evidence if item.research_run_id}
+        research_run_id = runs.pop() if len(runs) == 1 else None
+    else:
+        candidates = store.get_run_candidates(request.research_run_id)
+        if candidates is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"research run {request.research_run_id} not found",
+            )
+        match = [c for c in candidates if c.id == request.candidate_id]
+        if not match:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"candidate {request.candidate_id} is not part of research run "
+                    f"{request.research_run_id}"
+                ),
+            )
+        candidate = match[0]
+        # Scoped to the requested run: the store is append-only across runs,
+        # so an unscoped read would mix runs and double-count any listing
+        # observed in more than one of them.
+        research_run_id = request.research_run_id
+        evidence = store.evidence_for_candidate(candidate.id, research_run_id)
+
+    # 4A/4B are re-derived from the same stored evidence so the specification
+    # cites current values. Both are pure functions over existing records.
+    price = extract_price_evidence(candidate.id, evidence)
+    purchase = extract_purchase_evidence(candidate.id, evidence)
+
+    try:
+        specification = generate_product_specification(
+            candidate=candidate,
+            evidence=evidence,
+            price_evidence=price,
+            purchase_evidence=purchase,
+            research_run_id=research_run_id,
+        )
+    except EvidenceOwnershipError as exc:
+        # Inline evidence for a different candidate: a caller error, not a
+        # data condition. Refuse rather than cite it.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ProductSpecificationResponse(
+        specification=ProductSpecificationOut.from_specification(specification)
+    )

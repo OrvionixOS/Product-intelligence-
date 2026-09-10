@@ -603,6 +603,108 @@ unvalidated V1 assumptions appearing in no approved specification.
 - Sub-population medians (established, purchase-proxy) inherit 4A's
   unvalidated age and review thresholds.
 
+Milestone 4C (product generator) is implemented:
+
+- A deterministic product-specification generator
+  (`app/services/product_specification.py`, `product_specification_v1`)
+  turning evidence **already collected** by 3A/3C into a build specification
+  for ONE selected candidate. No provider calls, no LLM, no quota, no score
+- Exposed on demand at `POST /product/specification`. It is **not** run
+  automatically for the five ranked candidates: a caller selects a candidate
+  and asks for a specification
+
+#### Claim classes are local, conservative, and never upgraded
+
+4C answers a different question from the evidence pipeline, so it uses its
+own `SpecClaimClass` — `OBSERVED | INFERRED | ASSUMED | UNKNOWN`. The shared
+`TruthClass` is untouched. The mapping is deliberately lossy in the safe
+direction: **ESTIMATED becomes INFERRED, never OBSERVED.**
+
+Every field carries its claim class, a written basis, the evidence ids
+behind it, and the signal types involved. **A derived field is capped by the
+weakest source it rests on** (`cap_claim_class`), so no derivation can
+increase evidentiary certainty. A job classified from a Milestone 1
+hypothesis is ASSUMED; a job derived from observed provider text is
+INFERRED — never OBSERVED, because the buyer's actual job was not observed.
+
+#### Two format answers, never conflated
+
+Milestone 1 accepts seven product formats and explicitly rejects apps,
+SaaS, courses, coaching, communities, and subscriptions. That validator is
+**not** relaxed or reversed by 4C. Instead `format_selection_v1` returns two
+separate answers:
+
+- `ideal_format` — the best conceptual fit for the buyer's job, which may be
+  a CALCULATOR, QUIZ_ASSESSMENT, MINI_COURSE, or MICRO_SAAS. It is
+  **always ASSUMED**, flagged `outside_v1_build_capability` when this system
+  cannot build it, and never implied to be market-validated;
+- `buildable_v1_format` — the nearest of Milestone 1's seven approved
+  formats, which is what V1 can actually produce.
+
+Format is chosen on the job, not by copying incumbents. What the market
+actually ships is reported as `observed_dominant_format` for contrast, and a
+divergence is recorded as a conflict rather than resolved silently.
+
+#### The job taxonomy is an approved but unvalidated assumption
+
+`job_to_be_done_v1` classifies into CALCULATE, DECIDE, PLAN, TRACK, LEARN,
+EXECUTE, ASSESS, and ORGANISE by deterministic keyword matching over
+OBSERVED provider text. It is a documented V1 heuristic, **not an
+empirically proven model of buyer behaviour**, and no token is shared
+between two jobs. When signals do not separate the leading jobs, the result
+is UNKNOWN and the tie is reported — the conservative answer, not a guess.
+
+#### Missing evidence stays missing
+
+No evidence produces a `MISSING` specification with a `missing_reason`, not
+an invented product. Sparse evidence still generates a specification but
+flags `insufficient_evidence` and leaves unsupported fields ASSUMED or
+UNKNOWN. Contradictory signals are preserved in `conflicts` with the
+deterministic rule that resolved them.
+
+#### The claim filter applies to the generator too
+
+Milestone 1 text is a generation hypothesis and may carry marketing
+language; Milestone 1's validator rejects unsupported *formats*, not
+unsupported *claims*. So the forbidden-claim vocabulary gates the
+deterministic generator as well as any future provider: a candidate titled
+"Proven Best-Selling …" or promising "guaranteed revenue" yields **no**
+product name or core promise, with the basis naming the pattern that was
+matched. Matching is done on an NFKC-normalized, invisible-character-stripped,
+homoglyph-folded copy of the text, so a look-alike character cannot smuggle a
+claim past the filter.
+
+#### Evidence reads are scoped to one research run
+
+The store is append-only across runs, so a candidate researched twice
+accumulates one set of records per run. `evidence_for_candidate` therefore
+takes an optional `research_run_id`, and the endpoint always passes it:
+an unscoped read would mix provenance and count a listing observed in two
+runs twice, which can change the job classification. A record carrying no
+run id is returned by every scoped read — it cannot belong to a different
+run, and dropping it would silently discard stored evidence. In inline mode
+the run stamp is taken from the evidence itself, never from the request.
+
+#### What 4C never claims
+
+It fabricates no customer problem, demand, purchase, sale, revenue, market
+share, conversion rate, or willingness to pay. Price appears only as a
+**citation of Milestone 4B**: observed ASKING prices, never a recommended,
+optimal, or transaction price. Competitor product *contents* are not
+collected, so differentiation ideas are explicitly design hypotheses rather
+than observed gaps. Nothing here predicts that a product will sell.
+
+#### The LLM seam is prose-only
+
+`ProductSpecificationProvider` reserves a place for a future language model,
+and the V1 default (`TemplateProseProvider`) is deterministic with **no live
+LLM dependency**. Every decision is made before a provider is consulted. A
+provider may reword `product_name` and `core_promise` and nothing else: it
+cannot select or change a claim class, create or alter evidence, produce any
+number, change the format decision, or convert an assumption into a finding.
+Proposed prose is validated against forbidden market claims and rejected if
+it smuggles one in.
+
 ### Known technical debt
 
 - **Unbounded in-memory research store.** `ResearchStore` is a process-wide,
@@ -670,6 +772,21 @@ The response contains snapshot metadata, quota telemetry
 content-outlier observations, evidence references, provider errors, and
 explicit missing/unknown records. Retrieve a stored snapshot via
 `GET /research/public-content/snapshots/{snapshot_id}`.
+
+## Generate a product specification (Milestone 4C)
+
+```bash
+curl -X POST http://127.0.0.1:8000/product/specification \
+  -H 'Content-Type: application/json' \
+  -d '{"research_run_id": "<id from /candidates/discover>", "candidate_id": "<one selected candidate>"}'
+```
+
+Derived from evidence already stored for that candidate: no provider calls,
+no LLM, and no score. The response separates `ideal_format` from
+`buildable_v1_format`, carries per-field claim classes with their basis and
+evidence ids, and reports `conflicts`, `assumptions`, and `unknowns`
+explicitly. Pass `"candidate": {...}` (with optional inline `"evidence"`)
+instead of the run/candidate pair to specify a candidate directly.
 
 ## Tests (fully mocked — no API credits spent)
 
