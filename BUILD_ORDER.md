@@ -111,6 +111,12 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   V1 default is a deterministic template and there is no live LLM
   dependency. A provider may reword narrative fields only: it cannot touch
   claim classes, evidence, formats, numbers, or decisions
+- The forbidden-claim vocabulary gates the deterministic generator as well
+  as any future provider, over Unicode-normalized text: candidate marketing
+  copy is never restated as a product name or promise
+- Observations are deduplicated and evidence reads are scoped to one
+  research run, so a re-observed listing cannot double-weight a
+  classification and a specification cites only its own run
 - Produces no score of any kind, and no POS/ECS/RED-YELLOW-GREEN
 
 ### Milestone 4D — Buyer reach (not started)

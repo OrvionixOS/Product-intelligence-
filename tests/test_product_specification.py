@@ -12,6 +12,7 @@ buildable format; and contradictory signals are reported rather than
 resolved silently.
 """
 
+import random
 import re
 from dataclasses import asdict
 from uuid import uuid4
@@ -25,7 +26,10 @@ from app.main import app
 from app.services.price_evidence import extract_price_evidence
 from app.services.product_specification import (
     FORMAT_ASSETS,
+    JOB_TOKEN_STOPWORDS,
     EvidenceOwnershipError,
+    ObservedText,
+    unsupported_claim_in,
     FORMAT_SELECTION_VERSION,
     FORMAT_STRUCTURE,
     IDEAL_TO_BUILDABLE,
@@ -249,7 +253,7 @@ def test_basis_separates_observed_matches_from_candidate_text():
     evidence = [keyword_evidence(candidate.id, "quarterly tax calculator")]
     job = classify_job(collect_observed_text(evidence), candidate)
     assert "observed evidence record(s) carrying" in job.basis
-    assert "candidate text contributed the remaining" in job.basis
+    assert "candidate text contributed a further" in job.basis
 
 
 def test_candidate_text_alone_is_assumed_not_inferred():
@@ -972,3 +976,279 @@ def test_spec_claim_class_is_local_and_truth_class_is_untouched():
         "UNKNOWN",
     ]
     assert SpecClaimClass is not TruthClass
+
+
+# ==========================================================================
+# Adversarial review regressions (review of 8705da1)
+#
+# Each test below reproduces a defect the review found by probing, not by
+# reading. They are grouped so a future change that reintroduces one fails
+# with the reason attached.
+# ==========================================================================
+
+
+def test_evidence_for_another_job_never_raises_this_job_class():
+    """A job with zero observed matches rests on the hypothesis alone.
+
+    Regression: `observed_support` was a single global flag, so evidence that
+    matched ANY job promoted the winning job to INFERRED and cited that
+    unrelated record as its provenance.
+    """
+    candidate = make_spec_candidate(
+        title="Freelance tax calculator estimator",
+        problem="Freelancers cannot calculate the cost or estimate the formula",
+        buyer_outcome="Calculate the percentage to set aside",
+    )
+    # One observed record, matching LEARN ("guide") and nothing in CALCULATE.
+    evidence = [keyword_evidence(candidate.id, "freelance tax guide")]
+    job = classify_job(collect_observed_text(evidence), candidate)
+
+    assert job.job == JobToBeDone.CALCULATE
+    assert job.claim_class == SpecClaimClass.ASSUMED
+    assert job.claim_class != SpecClaimClass.INFERRED
+    assert job.evidence_ids == ()
+    assert "no observed evidence text matched this job" in job.basis
+
+
+def test_the_class_downgrade_propagates_to_dependent_fields():
+    candidate = make_spec_candidate(
+        title="Freelance tax calculator estimator",
+        problem="Freelancers cannot calculate the cost or estimate the formula",
+        buyer_outcome="Calculate the percentage to set aside",
+    )
+    spec = build_spec(candidate, [keyword_evidence(candidate.id, "freelance tax guide")])
+    assert spec.buyer_job.claim_class == SpecClaimClass.ASSUMED
+    assert spec.buyer_job.evidence_ids == ()
+    # A format derived from an ASSUMED job cannot be INFERRED.
+    assert spec.format_recommendation.buildable_claim_class == SpecClaimClass.ASSUMED
+
+
+def test_cited_evidence_actually_matched_the_winning_job():
+    """Provenance must support the claim it is attached to."""
+    candidate = make_spec_candidate()
+    matching = keyword_evidence(candidate.id, "quarterly tax calculator")
+    unrelated = keyword_evidence(candidate.id, "freelance tax guide")
+    job = classify_job(collect_observed_text([matching, unrelated]), candidate)
+    assert job.job == JobToBeDone.CALCULATE
+    assert job.claim_class == SpecClaimClass.INFERRED
+    assert job.evidence_ids == (matching.id,)
+    assert unrelated.id not in job.evidence_ids
+
+
+def test_no_single_word_job_token_is_a_stopword():
+    """Regression: "or", "which" and "best" classified on grammar alone.
+
+    Multi-word tokens are exempt: "how much" and "should i" carry intent
+    that neither of their words carries alone. A ONE-word token has nothing
+    else to lean on, so it must not be a stopword.
+    """
+    for job, tokens in JOB_TOKENS.items():
+        for token in tokens:
+            if " " in token:
+                continue
+            assert token not in JOB_TOKEN_STOPWORDS, (job.value, token)
+
+
+def test_an_ordinary_title_is_not_classified_by_a_conjunction():
+    """Regression: 'meal chart for mums or dads' was classified DECIDE."""
+    candidate = make_spec_candidate(title="Zzz", problem="Zzz", buyer_outcome="Zzz")
+    job = classify_job(
+        [ObservedText("Printable meal chart for mums or dads", uuid4(), "x")], candidate
+    )
+    assert job.job == JobToBeDone.UNKNOWN
+    assert job.scores == ()
+
+
+def test_a_superlative_does_not_outrank_the_meaningful_token():
+    """Regression: 'best' + 'which' beat 'planner' in a planning title."""
+    candidate = make_spec_candidate(title="Zzz", problem="Zzz", buyer_outcome="Zzz")
+    job = classify_job(
+        [ObservedText("Wedding planner: which colours, best day", uuid4(), "x")],
+        candidate,
+    )
+    assert job.job == JobToBeDone.PLAN
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Proven Best-Selling Freelance Tax Calculator",
+        "The Guaranteed Budget Planner",
+        "Revenue Booster Spreadsheet",
+    ],
+)
+def test_a_market_claim_in_the_candidate_title_is_not_restated_as_a_name(title):
+    """Regression: candidate text bypassed the forbidden-claim filter.
+
+    The filter guarded a future LLM's prose but not the deterministic
+    generator, so Milestone 1 marketing copy became the product name.
+    """
+    candidate = make_spec_candidate(title=title)
+    spec = build_spec(candidate, [keyword_evidence(candidate.id, "tax calculator")])
+    assert spec.product_name.value is None
+    assert spec.product_name.claim_class == SpecClaimClass.UNKNOWN
+    assert "unsupported market claim" in spec.product_name.basis
+
+
+def test_a_market_claim_in_the_buyer_outcome_is_not_restated_as_a_promise():
+    candidate = make_spec_candidate(
+        buyer_outcome="Earn guaranteed revenue of $5,000 per month, validated by the market"
+    )
+    spec = build_spec(candidate, [keyword_evidence(candidate.id, "tax calculator")])
+    assert spec.core_promise.value is None
+    assert spec.core_promise.claim_class == SpecClaimClass.UNKNOWN
+    assert "unsupported market claim" in spec.core_promise.basis
+
+
+def test_candidate_claim_gate_uses_the_same_vocabulary_as_the_prose_gate():
+    """One rule, applied to the generator and to any future provider."""
+    for phrase in ("proven", "guaranteed", "revenue", "best-selling", "will sell"):
+        assert unsupported_claim_in(f"A {phrase} product") is not None
+    assert unsupported_claim_in("A quarterly set-aside sheet") is None
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "A provеn bestseller",          # Cyrillic homoglyph
+        "A pro​ven winner",            # zero-width space
+        "Boosts ｒｅｖｅｎｕｅ",  # fullwidth
+        "This will sell out",          # non-breaking space
+        "A pro­ven method",            # soft hyphen
+    ],
+)
+def test_unicode_tricks_cannot_smuggle_a_market_claim_past_the_filter(text):
+    """Regression: every one of these was accepted before normalization."""
+    with pytest.raises(ProseGenerationError):
+        validate_prose(text)
+
+
+def test_clean_prose_survives_normalization():
+    validate_prose("A tidy quarterly set-aside sheet")
+
+
+@pytest.mark.parametrize(
+    "proposed",
+    [
+        {"product_name": 42},
+        {"product_name": {"nested": "value"}},
+        {"product_name": ["a", "b"]},
+        {"product_name": None},
+    ],
+)
+def test_malformed_provider_values_raise_a_controlled_error(proposed):
+    """Regression: these raised AttributeError, not ProseGenerationError."""
+    candidate = make_spec_candidate()
+    spec = build_spec(candidate, [keyword_evidence(candidate.id, "tax calculator")])
+    with pytest.raises(ProseGenerationError):
+        apply_prose(spec, proposed)
+
+
+def test_provider_output_that_is_not_a_mapping_is_rejected():
+    candidate = make_spec_candidate()
+    spec = build_spec(candidate, [keyword_evidence(candidate.id, "tax calculator")])
+    with pytest.raises(ProseGenerationError):
+        apply_prose(spec, [("product_name", "x")])
+
+
+def test_re_observing_one_listing_does_not_double_weight_it():
+    """Regression: a duplicate of ONE listing flipped TRACK to UNKNOWN.
+
+    The store is append-only across runs, so the same listing can be stored
+    more than once. It is one listing, and must count once.
+    """
+    candidate = make_spec_candidate(title="Zzz", problem="Zzz", buyer_outcome="Zzz")
+
+    def titled(listing_id: str, title: str):
+        evidence = listing_evidence(candidate.id, [comparable(listing_id)])
+        for item in evidence:
+            object.__setattr__(item, "raw_payload", {**item.raw_payload, "title": title})
+        return evidence
+
+    calc, track = titled("A", "tax calculator"), titled("B", "habit tracker")
+    balanced = classify_job(collect_observed_text(calc + track), candidate)
+    duplicated = classify_job(
+        collect_observed_text(calc + titled("A", "tax calculator") + track), candidate
+    )
+    assert balanced.job == JobToBeDone.TRACK
+    assert duplicated.job == balanced.job
+    assert duplicated.scores == balanced.scores
+
+
+def test_specification_is_invariant_under_evidence_order():
+    """Equivalent evidence must yield an identical document, not a shuffled one."""
+    candidate = make_spec_candidate()
+    evidence = (
+        [keyword_evidence(candidate.id, "quarterly tax calculator")]
+        + listing_evidence(
+            candidate.id,
+            [comparable(f"L{i}", price=10.0 + i, seller_id=f"s{i}") for i in range(4)],
+        )
+        + [video_evidence(candidate.id, "Calculate freelance tax", ["calculator"])]
+    )
+    base = build_spec(candidate, list(evidence))
+    rng = random.Random(20260910)
+    for _ in range(50):
+        shuffled = list(evidence)
+        rng.shuffle(shuffled)
+        assert build_spec(candidate, shuffled) == base
+
+
+def test_stored_evidence_reads_are_scoped_to_one_research_run():
+    """Regression: the accessor merged every run a candidate appeared in."""
+    store = ResearchStore()
+    candidate = make_spec_candidate()
+    run_a, run_b = uuid4(), uuid4()
+    for run_id in (run_a, run_b):
+        for item in listing_evidence(candidate.id, [comparable("L1")]):
+            store.add_evidence(item.model_copy(update={"research_run_id": run_id}))
+
+    unscoped = store.evidence_for_candidate(candidate.id)
+    scoped = store.evidence_for_candidate(candidate.id, run_a)
+    assert len(unscoped) == 6
+    assert len(scoped) == 3
+    assert {item.research_run_id for item in scoped} == {run_a}
+
+
+def test_unstamped_evidence_is_never_dropped_by_a_scoped_read():
+    """A record with no run id cannot belong to a different run."""
+    store = ResearchStore()
+    candidate = make_spec_candidate()
+    for item in listing_evidence(candidate.id, [comparable("L1")]):
+        store.add_evidence(item)
+    assert len(store.evidence_for_candidate(candidate.id, uuid4())) == 3
+
+
+def test_inline_mode_does_not_trust_a_caller_supplied_run_id():
+    """Regression: a caller could stamp any run id onto inline evidence."""
+    client = TestClient(app)
+    candidate = make_spec_candidate()
+    evidence = keyword_evidence(candidate.id, "quarterly tax calculator")
+    response = client.post(
+        "/product/specification",
+        json={
+            "candidate": candidate.model_dump(mode="json"),
+            "research_run_id": str(uuid4()),  # unrelated to the evidence
+            "evidence": [evidence.model_dump(mode="json")],
+        },
+    )
+    assert response.status_code == 200
+    # The evidence carries no run, so the specification claims none.
+    assert response.json()["specification"]["research_run_id"] is None
+
+
+def test_inline_mode_takes_the_run_stamp_from_the_evidence():
+    client = TestClient(app)
+    candidate = make_spec_candidate()
+    run_id = uuid4()
+    evidence = keyword_evidence(candidate.id, "quarterly tax calculator").model_copy(
+        update={"research_run_id": run_id}
+    )
+    response = client.post(
+        "/product/specification",
+        json={
+            "candidate": candidate.model_dump(mode="json"),
+            "evidence": [evidence.model_dump(mode="json")],
+        },
+    )
+    assert response.json()["specification"]["research_run_id"] == str(run_id)

@@ -662,6 +662,29 @@ flags `insufficient_evidence` and leaves unsupported fields ASSUMED or
 UNKNOWN. Contradictory signals are preserved in `conflicts` with the
 deterministic rule that resolved them.
 
+#### The claim filter applies to the generator too
+
+Milestone 1 text is a generation hypothesis and may carry marketing
+language; Milestone 1's validator rejects unsupported *formats*, not
+unsupported *claims*. So the forbidden-claim vocabulary gates the
+deterministic generator as well as any future provider: a candidate titled
+"Proven Best-Selling …" or promising "guaranteed revenue" yields **no**
+product name or core promise, with the basis naming the pattern that was
+matched. Matching is done on an NFKC-normalized, invisible-character-stripped,
+homoglyph-folded copy of the text, so a look-alike character cannot smuggle a
+claim past the filter.
+
+#### Evidence reads are scoped to one research run
+
+The store is append-only across runs, so a candidate researched twice
+accumulates one set of records per run. `evidence_for_candidate` therefore
+takes an optional `research_run_id`, and the endpoint always passes it:
+an unscoped read would mix provenance and count a listing observed in two
+runs twice, which can change the job classification. A record carrying no
+run id is returned by every scoped read — it cannot belong to a different
+run, and dropping it would silently discard stored evidence. In inline mode
+the run stamp is taken from the evidence itself, never from the request.
+
 #### What 4C never claims
 
 It fabricates no customer problem, demand, purchase, sale, revenue, market

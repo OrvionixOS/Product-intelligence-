@@ -77,13 +77,32 @@ class ResearchStore:
     def evidence_for_snapshot(self, snapshot_id: UUID) -> list[EvidenceItem]:
         return [self._evidence[eid] for eid in self._evidence_by_snapshot.get(snapshot_id, [])]
 
-    def evidence_for_candidate(self, candidate_id: UUID) -> list[EvidenceItem]:
-        """Read-only view of everything stored for one candidate.
+    def evidence_for_candidate(
+        self, candidate_id: UUID, research_run_id: UUID | None = None
+    ) -> list[EvidenceItem]:
+        """Read-only view of stored evidence for one candidate.
 
-        Insertion-ordered and append-only, like every other read here: this
-        resolves existing records, it never collects, mutates, or infers.
+        The store is append-only across runs, so a candidate researched more
+        than once accumulates one set of records per run. Pass
+        `research_run_id` to read a single run; without it every run's
+        records are returned together, which mixes provenance and
+        double-counts any listing observed in more than one run.
+
+        A record carrying no run id is returned by every scoped read: it
+        cannot belong to a different run, and dropping it would silently
+        discard stored evidence rather than isolate provenance.
+
+        Insertion-ordered, like every other read here: this resolves existing
+        records, it never collects, mutates, or infers.
         """
-        return [self._evidence[eid] for eid in self._evidence_by_candidate.get(candidate_id, [])]
+        items = [self._evidence[eid] for eid in self._evidence_by_candidate.get(candidate_id, [])]
+        if research_run_id is None:
+            return items
+        return [
+            item
+            for item in items
+            if item.research_run_id in (research_run_id, None)
+        ]
 
     # ------------------------------------------------------------ keyword cache
 

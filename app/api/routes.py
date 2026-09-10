@@ -1589,7 +1589,11 @@ def product_specification(
     if request.candidate is not None:
         candidate = request.candidate
         evidence = list(request.evidence or [])
-        research_run_id = request.research_run_id
+        # The run stamp is taken from the evidence itself, never from the
+        # request: a caller must not be able to label a specification with a
+        # research run its evidence did not come from.
+        runs = {item.research_run_id for item in evidence if item.research_run_id}
+        research_run_id = runs.pop() if len(runs) == 1 else None
     else:
         candidates = store.get_run_candidates(request.research_run_id)
         if candidates is None:
@@ -1607,8 +1611,11 @@ def product_specification(
                 ),
             )
         candidate = match[0]
-        evidence = store.evidence_for_candidate(candidate.id)
+        # Scoped to the requested run: the store is append-only across runs,
+        # so an unscoped read would mix runs and double-count any listing
+        # observed in more than one of them.
         research_run_id = request.research_run_id
+        evidence = store.evidence_for_candidate(candidate.id, research_run_id)
 
     # 4A/4B are re-derived from the same stored evidence so the specification
     # cites current values. Both are pure functions over existing records.

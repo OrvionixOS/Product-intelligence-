@@ -78,6 +78,7 @@ only replacement strings for narrative fields and re-validates them.
 """
 
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 from enum import Enum
 from uuid import UUID
@@ -180,8 +181,12 @@ JOB_TOKENS: dict[JobToBeDone, tuple[str, ...]] = {
         "percentage", "hydration", "macro", "dosage", "measurement",
     ),
     JobToBeDone.DECIDE: (
-        "vs", "versus", "compare", "comparison", "which", "best", "choose",
-        "choosing", "decision", "should i", "or", "alternative", "pros and cons",
+        # NOTE: "or", "which" and "best" were deliberately removed. They are
+        # stopword-grade: "meal chart for mums or dads" is not a decision
+        # product, and a superlative appears in most marketing copy. A token
+        # must carry intent on its own, not merely occur in English.
+        "vs", "versus", "compare", "comparison", "choose",
+        "choosing", "decision", "should i", "alternative", "pros and cons",
     ),
     JobToBeDone.PLAN: (
         "planner", "plan", "planning", "schedule", "calendar", "roadmap",
@@ -208,6 +213,20 @@ JOB_TOKENS: dict[JobToBeDone, tuple[str, ...]] = {
         "catalog", "catalogue", "database", "library", "index", "system",
     ),
 }
+
+# Words too common in ordinary English or marketing copy to signal intent.
+# A SINGLE-WORD job token must never be one of these: it would classify on
+# grammar rather than on what the buyer is trying to get done. Multi-word
+# tokens may contain them ("how much", "should i"), because the phrase
+# carries intent that neither word carries alone.
+JOB_TOKEN_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "or", "the", "for", "with", "your", "you", "my",
+        "to", "of", "in", "on", "at", "by", "is", "it", "this", "that",
+        "which", "what", "who", "how", "best", "top", "new", "free", "easy",
+        "simple", "ultimate", "perfect", "great", "good",
+    }
+)
 
 # A job must lead the runner-up by at least this margin to be claimed.
 # Without a clear lead the result is UNKNOWN rather than a forced guess.
@@ -538,7 +557,22 @@ def collect_observed_text(evidence: list[EvidenceItem]) -> list[ObservedText]:
     listing titles, video titles and tags. Nothing is invented, and a record
     whose truth class is not OBSERVED contributes no text.
     """
-    harvested: list[ObservedText] = []
+    harvested: dict[tuple[str, str], ObservedText] = {}
+
+    def add(key: tuple[str, str], text: str, item: EvidenceItem) -> None:
+        """Record one observation, keeping the lowest evidence id per key.
+
+        The same listing can be stored more than once — re-observed in a
+        later research run, or returned by two of a candidate's marketplace
+        queries. Counting one real listing twice would double-weight it in
+        job classification, so each distinct observation is kept once.
+        Choosing the lowest id (rather than the first seen) keeps the choice
+        independent of the order evidence arrives in.
+        """
+        existing = harvested.get(key)
+        if existing is None or item.id < existing.evidence_id:
+            harvested[key] = ObservedText(text, item.id, item.signal_type)
+
     for item in evidence:
         if item.truth_class != TruthClass.OBSERVED:
             continue
@@ -546,23 +580,28 @@ def collect_observed_text(evidence: list[EvidenceItem]) -> list[ObservedText]:
         if item.signal_type == SIGNAL_SEARCH_VOLUME:
             keyword = payload.get("keyword")
             if keyword:
-                harvested.append(ObservedText(str(keyword), item.id, item.signal_type))
+                add((item.signal_type, str(keyword)), str(keyword), item)
         elif item.signal_type == SIGNAL_COMPETING_LISTING:
             # Read from the competing-listing record only. The price and
             # review records repeat the same payload; harvesting all three
             # would count one listing's words three times.
+            # Keyed by listing id, so one listing counts once however many
+            # times it was stored.
+            listing_id = str(payload.get("listing_id") or item.id)
             for key in ("title", "taxonomy"):
                 value = payload.get(key)
                 if value:
-                    harvested.append(ObservedText(str(value), item.id, item.signal_type))
+                    add((f"listing:{key}", listing_id), str(value), item)
         elif item.signal_type in (SIGNAL_VIDEO_VIEWS, SIGNAL_CONTENT_OBSERVATION):
+            video_id = str(payload.get("video_id") or item.id)
             for key in ("title", "description"):
                 value = payload.get(key)
                 if value:
-                    harvested.append(ObservedText(str(value), item.id, item.signal_type))
+                    add((f"video:{key}", video_id), str(value), item)
             for tag in payload.get("tags") or ():
-                harvested.append(ObservedText(str(tag), item.id, item.signal_type))
-    return harvested
+                add((f"video:tag:{tag}", video_id), str(tag), item)
+    # Canonical order, independent of the order evidence was stored in.
+    return [harvested[key] for key in sorted(harvested)]
 
 
 def classify_job(
@@ -575,16 +614,15 @@ def classify_job(
     candidate text is INFERRED at best and never OBSERVED.
     """
     scores: dict[JobToBeDone, int] = {job: 0 for job in JOB_TOKENS}
-    # Matches from OBSERVED provider text only, tracked apart from candidate
-    # text so the reported basis never credits a hypothesis as evidence.
+    # Matches from OBSERVED provider text only, tracked PER JOB. A record
+    # that supported some other job is not evidence for the winning one, so
+    # provenance is accumulated per job rather than globally.
     observed_matches: dict[JobToBeDone, int] = {job: 0 for job in JOB_TOKENS}
     matched: dict[JobToBeDone, list[str]] = {job: [] for job in JOB_TOKENS}
-    contributing: list[UUID] = []
-    signals: list[str] = []
-    observed_support = False
+    contributing: dict[JobToBeDone, set[UUID]] = {job: set() for job in JOB_TOKENS}
+    signals: dict[JobToBeDone, set[str]] = {job: set() for job in JOB_TOKENS}
 
     def score_text(text: str, evidence_id: UUID | None, signal: str | None) -> None:
-        nonlocal observed_support
         lowered = " ".join(_WORD_RE.findall(text.lower()))
         for job, tokens in JOB_TOKENS.items():
             for token in tokens:
@@ -592,12 +630,10 @@ def classify_job(
                     scores[job] += 1
                     matched[job].append(token)
                     if evidence_id is not None:
-                        observed_support = True
                         observed_matches[job] += 1
-                        if evidence_id not in contributing:
-                            contributing.append(evidence_id)
-                        if signal and signal not in signals:
-                            signals.append(signal)
+                        contributing[job].add(evidence_id)
+                        if signal:
+                            signals[job].add(signal)
 
     for entry in observed:
         score_text(entry.text, entry.evidence_id, entry.signal_type)
@@ -630,25 +666,35 @@ def classify_job(
                 f"signals did not separate the leading jobs ({', '.join(sorted(tied))}); "
                 f"reported UNKNOWN rather than forcing a confident classification"
             ),
-            evidence_ids=tuple(contributing),
-            signal_types=tuple(signals),
+            evidence_ids=tuple(
+                sorted({eid for job, _ in ranked if _ == top_score for eid in contributing[job]})
+            ),
+            signal_types=tuple(
+                sorted({s for job, _ in ranked if _ == top_score for s in signals[job]})
+            ),
         )
 
     # A job derived from observed provider text is INFERRED — a derivation
     # from evidence, never an observation of the buyer's actual job. Without
     # observed support it rests on a Milestone 1 hypothesis, so ASSUMED.
-    if observed_support:
+    # Only evidence that matched THIS job supports it. Evidence backing a
+    # different job neither raises this job's claim class nor is cited for it.
+    own_evidence = contributing[top_job]
+    if observed_matches[top_job] > 0:
         claim = SpecClaimClass.INFERRED
         basis = (
-            f"derived from {len(contributing)} observed evidence record(s) carrying "
+            f"derived from {len(own_evidence)} observed evidence record(s) carrying "
             f"{observed_matches[top_job]} {top_job.value.lower()} token match(es); "
-            f"candidate text contributed the remaining {top_score - observed_matches[top_job]}"
+            f"candidate text contributed a further "
+            f"{top_score - observed_matches[top_job]}"
         )
     else:
+        # The winning job rests entirely on the Milestone 1 hypothesis, even
+        # if unrelated evidence happened to match some other job.
         claim = SpecClaimClass.ASSUMED
         basis = (
-            "no observed evidence text matched; classified from the Milestone 1 "
-            "candidate hypothesis alone, which is not evidence"
+            "no observed evidence text matched this job; classified from the "
+            "Milestone 1 candidate hypothesis alone, which is not evidence"
         )
 
     return JobClassification(
@@ -657,8 +703,8 @@ def classify_job(
         matched_tokens=tuple(sorted(set(matched[top_job]))),
         scores=score_tuple,
         basis=basis,
-        evidence_ids=tuple(contributing),
-        signal_types=tuple(signals),
+        evidence_ids=tuple(sorted(own_evidence)),
+        signal_types=tuple(sorted(signals[top_job])),
     )
 
 
@@ -819,8 +865,10 @@ def observed_competitor_patterns(evidence: list[EvidenceItem]) -> tuple[SpecFiel
         if item.truth_class != TruthClass.OBSERVED:
             continue
         title = (item.raw_payload or {}).get("title")
-        if title and str(title) not in titles:
-            titles[str(title)] = item.id
+        if title:
+            seen_id = titles.get(str(title))
+            if seen_id is None or item.id < seen_id:
+                titles[str(title)] = item.id
 
     patterns = [
         SpecField(
@@ -846,7 +894,73 @@ def observed_competitor_patterns(evidence: list[EvidenceItem]) -> tuple[SpecFiel
     return tuple(patterns)
 
 
+# ------------------------------------------------- forbidden market claims
+
+# Phrases that assert a market finding this milestone cannot support. They
+# gate BOTH candidate-derived prose and any future provider prose: the
+# deterministic generator is not exempt from its own rule.
+FORBIDDEN_PROSE_PATTERNS = (
+    r"\bproven\b",
+    r"\bguarantee[ds]?\b",
+    r"\bwill sell\b",
+    r"\bbest[- ]sell(er|ing)\b",
+    r"\b\d+\s*%\s*(conversion|of buyers|success)",
+    r"\brevenue\b",
+    r"\bunits sold\b",
+    r"\bwillingness to pay\b",
+    r"\bmarket share\b",
+    r"\bvalidated by the market\b",
+)
+
+_FORBIDDEN_RE = tuple(re.compile(p, re.IGNORECASE) for p in FORBIDDEN_PROSE_PATTERNS)
+
+# Characters that render as nothing but break a word-boundary match, letting
+# "pro<zero-width-space>ven" slip past \bproven\b.
+_INVISIBLE_RE = re.compile(r"[\u00ad\u200b-\u200f\u2028\u2029\ufeff]")
+
+
+def _normalize_for_claim_scan(text: str) -> str:
+    """Fold a string to its plainest form before pattern matching.
+
+    Compatibility normalization (NFKC) collapses fullwidth and styled
+    look-alikes, invisible characters are dropped, and every run of Unicode
+    whitespace (non-breaking space included) becomes one plain space. Without
+    this, a homoglyph or a zero-width character defeats every pattern above.
+    """
+    folded = unicodedata.normalize("NFKC", text)
+    folded = _INVISIBLE_RE.sub("", folded)
+    # Confusable Cyrillic/Greek look-alikes NFKC does not fold.
+    folded = folded.translate(_CONFUSABLES)
+    return " ".join(folded.split())
+
+
+# Latin look-alikes for letters used by the forbidden patterns. NFKC treats
+# these as distinct letters, so they are mapped explicitly.
+_CONFUSABLES = str.maketrans(
+    {
+        "\u0430": "a", "\u0435": "e", "\u043e": "o", "\u0440": "p",
+        "\u0441": "c", "\u0445": "x", "\u0443": "y", "\u0456": "i",
+        "\u04bb": "h", "\u0455": "s", "\u0461": "w", "\u03bf": "o",
+        "\u03b1": "a", "\u03c1": "p", "\u0501": "d", "\u0261": "g",
+    }
+)
+
+
 # ---------------------------------------------------------- the generator
+
+
+def unsupported_claim_in(text: str) -> str | None:
+    """Return the forbidden-claim pattern a text asserts, or None.
+
+    Applied to candidate-derived prose as well as provider prose. Milestone 1
+    text is a generation hypothesis that may contain marketing language; this
+    milestone must not restate "proven", "best-selling", or a revenue figure
+    as though evidence supported it.
+    """
+    for pattern in _FORBIDDEN_RE:
+        if pattern.search(_normalize_for_claim_scan(text)):
+            return pattern.pattern
+    return None
 
 
 def _product_name(candidate: Candidate, recommendation: FormatRecommendation) -> SpecField:
@@ -858,6 +972,19 @@ def _product_name(candidate: Candidate, recommendation: FormatRecommendation) ->
             basis="no buildable format was determined, so no product name is proposed",
         )
     suffix = recommendation.buildable_v1_format.value.replace("_", " ").title()
+    offending = unsupported_claim_in(candidate.title)
+    if offending:
+        # The candidate title asserts a market claim no evidence supports.
+        # Restating it would launder a hypothesis into the product name.
+        return SpecField(
+            value=None,
+            claim_class=SpecClaimClass.UNKNOWN,
+            basis=(
+                f"the Milestone 1 candidate title asserts an unsupported market "
+                f"claim (matching {offending!r}), so it is not restated as a "
+                f"product name; no name is proposed"
+            ),
+        )
     return SpecField(
         value=f"{candidate.title} — {suffix}",
         claim_class=SpecClaimClass.ASSUMED,
@@ -876,6 +1003,17 @@ def _core_promise(candidate: Candidate, job: JobClassification) -> SpecField:
             value=None,
             claim_class=SpecClaimClass.UNKNOWN,
             basis="the candidate carried no buyer outcome to restate",
+        )
+    offending = unsupported_claim_in(outcome)
+    if offending:
+        return SpecField(
+            value=None,
+            claim_class=SpecClaimClass.UNKNOWN,
+            basis=(
+                f"the Milestone 1 buyer outcome asserts an unsupported market claim "
+                f"(matching {offending!r}); a trailing disclaimer would not undo it, "
+                f"so no promise is stated"
+            ),
         )
     return SpecField(
         value=(
@@ -1020,10 +1158,12 @@ def generate_product_specification(
     price_reference = build_price_reference(price_evidence)
     conflicts = _detect_conflicts(job, recommendation, candidate)
 
+    # Sorted, so an equivalent evidence set always yields the same document
+    # regardless of the order the records were stored or supplied in.
     supporting = tuple(
-        dict.fromkeys(
-            [entry.evidence_id for entry in observed]
-            + [eid for pattern in patterns for eid in pattern.evidence_ids]
+        sorted(
+            {entry.evidence_id for entry in observed}
+            | {eid for pattern in patterns for eid in pattern.evidence_ids}
         )
     )
 
@@ -1149,37 +1289,29 @@ class ProseGenerationError(Exception):
     """Raised when proposed prose violates the 4C claim rules."""
 
 
-# Phrases a prose provider may never introduce. A future LLM rewording the
-# narrative fields must not smuggle in a market finding.
-FORBIDDEN_PROSE_PATTERNS = (
-    r"\bproven\b",
-    r"\bguarantee[ds]?\b",
-    r"\bwill sell\b",
-    r"\bbest[- ]sell(er|ing)\b",
-    r"\b\d+\s*%\s*(conversion|of buyers|success)",
-    r"\brevenue\b",
-    r"\bunits sold\b",
-    r"\bwillingness to pay\b",
-    r"\bmarket share\b",
-    r"\bvalidated by the market\b",
-)
-
-_FORBIDDEN_RE = tuple(re.compile(p, re.IGNORECASE) for p in FORBIDDEN_PROSE_PATTERNS)
-
 # The only fields a prose provider may rewrite. Everything else — claim
 # classes, evidence ids, formats, structure, numbers — is out of reach.
 REWRITABLE_PROSE_FIELDS = ("product_name", "core_promise")
 
 
 def validate_prose(text: str) -> None:
-    """Reject prose that asserts a finding the evidence does not support."""
-    if not text or not text.strip():
+    """Reject prose that asserts a finding the evidence does not support.
+
+    Anything that is not a plain non-empty string is rejected as malformed:
+    a provider returning a number, a mapping, or None is a provider fault,
+    never a value to substitute into the specification.
+    """
+    if not isinstance(text, str):
+        raise ProseGenerationError(
+            f"proposed prose must be a string, got {type(text).__name__}"
+        )
+    if not text.strip():
         raise ProseGenerationError("proposed prose is empty; nothing to substitute")
-    for pattern in _FORBIDDEN_RE:
-        if pattern.search(text):
-            raise ProseGenerationError(
-                f"proposed prose contains a forbidden claim matching {pattern.pattern!r}"
-            )
+    offending = unsupported_claim_in(text)
+    if offending:
+        raise ProseGenerationError(
+            f"proposed prose contains a forbidden claim matching {offending!r}"
+        )
 
 
 class ProductSpecificationProvider:
@@ -1220,6 +1352,11 @@ def apply_prose(
     field outside `REWRITABLE_PROSE_FIELDS` is rejected, and every proposed
     string is validated against the forbidden-claim patterns.
     """
+    if not isinstance(proposed, dict):
+        raise ProseGenerationError(
+            f"provider output must be a mapping of field to text, got "
+            f"{type(proposed).__name__}"
+        )
     if not proposed:
         return specification
 
