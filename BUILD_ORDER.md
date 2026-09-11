@@ -228,9 +228,36 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   `competition_opportunity`, so it cannot be wired into the legacy
   `ScoreDimensions.competition_opportunity` weight
 
-### Milestone 4F — Audience interest formalization (not started)
-- Formalize the 3C preliminary audience-interest dimension into an evidence
-  derivation with the 4A/4B/4D posture. Not started
+### Milestone 4F — Audience attention (complete)
+- `app/services/audience_attention.py`, `audience_attention_v1`: a
+  deterministic derivation over public-content evidence 3B collected and 3C
+  resolved. No provider, no provider call, no endpoint, no persistence
+- Returned by `POST /research/preliminary` under `audience_attention`, as a
+  fifth independent `DerivationOutcome` behind the same failure boundary
+- Reports the DISTRIBUTION and CONSISTENCY of observed attention, never a
+  sum. No total-views feature exists, because a total is the statistic one
+  viral video corrupts. `attention_pattern_v1` reports the shape, and every
+  pattern states explicitly what it does NOT establish
+- The largest contributor is isolated rather than averaged away:
+  `top_video_attention_share`, `median_views_excluding_top_video`,
+  `videos_covering_half_of_attention`, `top_channel_attention_share`. A field
+  whose attention is one video reports SINGLE_VIDEO_ATTENTION however large
+  that video is, and every shape classification is scale-invariant
+- Attention is not demand: `buyer_count`, `purchase_intent`,
+  `candidate_audience_size`, `demand_durability`, `willingness_to_pay`,
+  `watch_time` and `conversion_probability` are permanent UNKNOWN markers
+- Subscriber counts are not read at all. An AST guard proves the module
+  cannot reach `channel_subscriber_count`, so channel context can never
+  become a candidate's audience size
+- Five facts stay distinguishable: capability not requested, provider
+  failed, unexpected error, ran-and-returned-nothing, and videos observed
+  whose view counts were not. The last is ATTENTION_UNMEASURED and is never
+  the same as attention measured at zero
+- No score: `value` is permanently `None`, state is
+  EVIDENCE_PRESENT_UNSCORED. No POS, ECS, or RED/YELLOW/GREEN
+- Dimension name is `preliminary_audience_attention` — neither the legacy
+  `ScoreDimensions.audience_interest` nor 3C's scored
+  `preliminary_audience_interest`, which this milestone leaves untouched
 
 ## Milestone 5 — Faceless content intelligence
 - YouTube creator baseline

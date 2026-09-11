@@ -1081,6 +1081,139 @@ see one new array.
   unknown and `CONCENTRATED_FIELD` says only that one seller holds most of
   the observable listings.
 
+Milestone 4F (audience attention) is implemented:
+
+- A deterministic Audience Attention derivation
+  (`app/services/audience_attention.py`, `audience_attention_v1`) over
+  public-content evidence **already collected** by 3B and resolved by 3C. No
+  provider call, no quota, no new endpoint, no persistence
+- Returned by `POST /research/preliminary` under `audience_attention`, as a
+  fifth independent `DerivationOutcome` behind the same failure boundary
+
+#### Attention is not interest, and interest is not demand
+
+| Observation | What it is | What it is not |
+| --- | --- | --- |
+| a view | one playback event | a person, a buyer, or a purchase intent |
+| a like | an interaction with a video | willingness to pay |
+| a subscriber | context about a **channel** | the size of a candidate's audience |
+| a viral video | one video that was watched | proof demand exists, or will persist |
+
+`buyer_count`, `purchase_intent`, `candidate_audience_size`,
+`demand_durability`, `willingness_to_pay`, `watch_time` and
+`conversion_probability` are permanent `UNKNOWN` markers on every result.
+
+#### Subscriber counts are not read at all
+
+`VideoObservation` carries `channel_subscriber_count`, `channel_view_count`
+and `channel_video_count`. This module reads none of them, and an AST guard
+proves it. A subscriber count describes a creator's whole audience across
+every topic they cover; treating it as a candidate's audience is the easiest
+way to turn channel context into a fabricated market size, and the safest
+guarantee is code that cannot reach the number.
+
+#### Distribution and consistency, never a sum
+
+Summing views is how one viral video makes a whole opportunity look
+universally popular, so **no total-views feature exists**. What is reported
+instead isolates the largest contributor rather than averaging it away:
+
+| Feature | Question |
+| --- | --- |
+| `top_video_attention_share` | how much of the attention is one video's |
+| `median_views_excluding_top_video` | what the field looks like without it |
+| `videos_covering_half_of_attention` | how few videos account for half |
+| `top_channel_attention_share` | the same question at creator level |
+| `videos_within_band_of_median` | how many videos are typical rather than freak |
+
+A field of one video at 50,000,000 views alongside 29 videos at 5 views
+reports `SINGLE_VIDEO_ATTENTION`, a median of 5, and a
+`median_views_excluding_top_video` of 5 — however large the outlier. Every
+shape classification is **scale-invariant**: multiplying every view count
+changes the medians and nothing else, because concentration is a ratio.
+
+**Consistency is measured relative to this field's median.** A field whose
+videos are uniformly ignored is perfectly consistent at a trivial level, so
+`proportion_within_band_of_median` must always be read next to `median_views`
+and never as a level of interest. Both are emitted together, alongside the
+pattern naming the outlier, and a limitation string says so explicitly.
+
+#### Eight shapes, none of them a level of demand
+
+`UNKNOWN_ATTENTION`, `NO_CONTENT_OBSERVED`, `ATTENTION_UNMEASURED`,
+`NO_OBSERVED_ATTENTION`, `SPARSE_SAMPLE`, `SINGLE_VIDEO_ATTENTION`,
+`CONCENTRATED_ATTENTION`, `DISTRIBUTED_ATTENTION`. Each carries an
+`AttentionClaim` with both what it observes and what it **does not
+establish**, emitted together so a consumer cannot receive a pattern without
+its boundary. The broadest pattern, `DISTRIBUTED_ATTENTION`, explicitly
+disclaims that demand exists, that it would persist, or that any viewer would
+buy anything.
+
+#### Five facts about missing data, all distinguishable
+
+Capability not requested, provider failed, unexpected provider error, ran and
+returned nothing, and — kept separate from all four — videos observed whose
+view counts were not. That last is `ATTENTION_UNMEASURED`, and it is never
+the same as `NO_OBSERVED_ATTENTION`, which is attention measured at zero. A
+video with no observed view count is not a video with zero views, and a share
+of no observed attention is `null` rather than zero.
+
+The evidence **record**, not the payload snapshot, is the authority: a view
+count is read only from a record whose `truth_class` is OBSERVED, so a
+payload claiming 999,999 views against an UNKNOWN record is unmeasured. The
+reducer reads exactly three payload keys — `video_id`, `channel_id`,
+`published_at` — and a test pins that set.
+
+#### What 4F deliberately does not compute
+
+Keyword search volume, CPC and auction data belong to search demand; channels
+as reachable endpoints to 4D; listings, sellers, prices and review proxies to
+4A, 4B and 4E. An AST guard asserts the module reads none of their fields.
+`channels_with_observed_attention` requires an OBSERVED view count, so it is
+deliberately **not** 4D's channel population, which counts creators with a
+relevant video whether or not any metric was returned; a regression test
+builds a field where the two numbers differ.
+
+#### Relationship to the existing scored audience dimension
+
+3B's `audience_interest_dimension_v1` produces a 0-100 value from median
+views, which 3C exposes as the SCORED dimension
+`preliminary_audience_interest` and the preliminary ranking consumes. **4F
+neither changes nor replaces it**, and a regression test asserts it still
+scores. 4F is a different layer with no value at all, named
+`preliminary_audience_attention` so the two can never be confused. The
+milestone is deliberately unscored: a single number derived from median views
+is monotone in views, which is precisely the reading 4F exists to avoid.
+
+#### V1 assumptions
+
+Every threshold is an unvalidated assumption chosen by inspection, calibrated
+against no outcome data, and decides only which shape is reported:
+`SPARSE_SAMPLE_MAX_VIDEOS` (3), `SINGLE_VIDEO_DOMINANCE_SHARE` (0.6),
+`CONCENTRATION_SHARE` (0.4), `DISTRIBUTED_MIN_CHANNELS` (3), and the typical
+band of 0.5x-2.0x the median. The band is multiplicative because view
+distributions are heavy-tailed, so a symmetric absolute band would classify
+almost everything as atypical.
+
+#### Additive API change
+
+`POST /research/preliminary` returns one additional field,
+`audience_attention`. No existing field is removed, renamed, or retyped, no
+endpoint is added or changed, and there is no schema migration. As with
+`buyer_reach` and `competition_opportunity`, the field is **required**
+because the derivation always reports an outcome.
+
+#### Known limitations
+
+- Public content is a provider-ordered sample, so absence of attention
+  measures the sample rather than the world.
+- Attention statistics describe the videos that were returned. They describe
+  no population of buyers, and no pattern is a level of demand.
+- The sample is whatever the content queries returned. Relevance rests on
+  those Milestone 1 hypotheses exactly as it does for 4D.
+- Temporal spread (`publish_span_days`, `distinct_publish_months`) records
+  when content appeared. It is never evidence that attention persisted.
+
 ### Known technical debt
 
 - **Unbounded in-memory research store and its indexes.** `ResearchStore` is
@@ -1108,6 +1241,26 @@ see one new array.
   would make two milestones order identifiers differently from a third.
   Deferred deliberately: consolidating it touches three shipped derivations at
   once and belongs in a change reviewed for that, not in a documentation pass.
+- **`_id_sort_key` now exists in a fifth module.** Milestone 4F adds its own
+  copy in `app/services/audience_attention.py`. The entries above apply
+  unchanged; consolidating now touches five shipped derivations.
+- **Two evidence reducers with the same shape.** `collect_listing_views`
+  (marketplace) and `collect_video_views` (public content) implement the same
+  pattern — dedupe by entity id, gate values on the evidence record's truth
+  class, canonicalize `evidence_ids`, count suppressed duplicates — against
+  different signal types. 4F deliberately kept its reducer local rather than
+  generalising the marketplace one, because generalising would have touched
+  4A, 4B and 4E in a milestone that adds a derivation. If a sixth consumer
+  appears, extract the shared shape then rather than growing a third copy.
+- **The scored 3C audience dimension and the unscored 4F derivation
+  coexist.** `preliminary_audience_interest` remains SCORED via
+  `audience_interest_dimension_v1`, a value monotone in median views that the
+  preliminary ranking consumes, while `preliminary_audience_attention`
+  deliberately carries no value. Both are correct for what they are, but a
+  consumer reading only the scored dimension gets exactly the
+  more-views-is-better reading 4F exists to avoid. Reconciling them means
+  changing ranking behaviour, which is out of scope for a derivation
+  milestone and belongs in the scoring milestone.
 - **`_id_sort_key` now exists in a fourth module.** Milestone 4E adds its own
   copy in `app/services/competition_opportunity.py`, for the same reason and
   with the same body as the 4A/4B/4D copies. The entry above applies

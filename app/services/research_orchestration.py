@@ -63,6 +63,10 @@ from app.services.preliminary_ranking import (
 )
 from app.services.public_content import run_public_content_research
 from app.services.buyer_reach import BuyerReachResult, extract_buyer_reach
+from app.services.audience_attention import (
+    AudienceAttentionResult,
+    extract_audience_attention,
+)
 from app.services.competition_opportunity import (
     CompetitionOpportunityResult,
     extract_competition_opportunity,
@@ -110,6 +114,7 @@ DERIVATION_PURCHASE_EVIDENCE = "purchase_evidence"
 DERIVATION_PRICE_EVIDENCE = "price_evidence"
 DERIVATION_BUYER_REACH = "buyer_reach"
 DERIVATION_COMPETITION_OPPORTUNITY = "competition_opportunity"
+DERIVATION_AUDIENCE_ATTENTION = "audience_attention"
 STATUS_DERIVATION_COMPLETE = "COMPLETE"
 STATUS_DERIVATION_NOT_REQUESTED = "NOT_REQUESTED"
 STATUS_DERIVATION_ERROR = "DERIVATION_ERROR"
@@ -298,6 +303,9 @@ class PreliminaryResearchResult:
     competition_opportunity: dict[UUID, CompetitionOpportunityResult] = field(
         default_factory=dict
     )
+    audience_attention: dict[UUID, AudienceAttentionResult] = field(
+        default_factory=dict
+    )
     derivations: list[DerivationOutcome] = field(default_factory=list)
     orchestration_version: str = ORCHESTRATION_VERSION
     dimensions_version: str = PRELIMINARY_DIMENSIONS_VERSION
@@ -433,6 +441,7 @@ async def run_preliminary_research(
     derive_price_evidence: bool = True,
     derive_buyer_reach: bool = True,
     derive_competition_opportunity: bool = True,
+    derive_audience_attention: bool = True,
 ) -> PreliminaryResearchResult:
     """Coordinate every available evidence capability, then rank deterministically.
 
@@ -639,10 +648,11 @@ async def run_preliminary_research(
         DERIVATION_PRICE_EVIDENCE, derive_price_evidence, extract_price_evidence
     )
 
-    # Milestones 4D and 4E need one thing 4A and 4B do not: WHY a capability
+    # Milestones 4D, 4E and 4F need one thing 4A and 4B do not: WHY a capability
     # produced nothing. Without it a failed capability would read as an absent
-    # channel or an empty competitive field, and missing evidence would
-    # silently become zero. One map serves both, so they can never disagree
+    # channel, an empty competitive field, or an absence of attention, and
+    # missing evidence would silently become zero. One map serves all three,
+    # so they can never disagree
     # about what a capability reason is. It is bound here rather than by
     # widening the generic runner, so 4A and 4B keep their two-argument
     # contract.
@@ -677,6 +687,19 @@ async def run_preliminary_research(
         extract_competition,
     )
 
+    # 4F consumes only the public-content capability, from the same map, so a
+    # failed content call cannot read as an absence of attention.
+    def extract_attention(candidate_id, evidence):
+        return extract_audience_attention(
+            candidate_id=candidate_id,
+            evidence=evidence,
+            missing_reasons=capability_missing_reasons,
+        )
+
+    audience_attention = run_derivation(
+        DERIVATION_AUDIENCE_ATTENTION, derive_audience_attention, extract_attention
+    )
+
     return PreliminaryResearchResult(
         research_run_id=run_id,
         candidate_count=len(candidates),
@@ -687,6 +710,7 @@ async def run_preliminary_research(
         price_evidence=price_evidence,
         buyer_reach=buyer_reach,
         competition_opportunity=competition_opportunity,
+        audience_attention=audience_attention,
         derivations=derivations,
     )
 
