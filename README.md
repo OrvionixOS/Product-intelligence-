@@ -954,6 +954,133 @@ array and may need updating.
   endpoint is an unvalidated V1 assumption. One operator running several
   storefronts counts as several endpoints.
 
+Milestone 4E (competition opportunity) is implemented:
+
+- A deterministic Competition Opportunity derivation
+  (`app/services/competition_opportunity.py`, `competition_opportunity_v1`)
+  over marketplace evidence **already collected** by 3A and resolved by 3C.
+  No provider call, no quota, no new endpoint, no persistence
+- Returned by `POST /research/preliminary` under `competition_opportunity`,
+  as a fourth independent `DerivationOutcome` behind the same failure
+  boundary as 4A/4B/4D
+
+#### Competition is not monotonic, and the code refuses to pretend otherwise
+
+"Less competition is better" and "more competition is better" are both wrong,
+and each is wrong in a way that would quietly corrupt every downstream
+decision:
+
+| Observation | One reading | The opposite reading |
+| --- | --- | --- |
+| few listings | an unserved need with room to enter | a need nobody found worth serving |
+| many listings | demand real enough to sustain many sellers | a field where attention is already spent |
+| one dominant seller | an incumbent proved a need nobody contested | an entrenched catalog no entrant displaces |
+| many small sellers | a low barrier and no lock-in | a commoditized field with nothing to differentiate on |
+
+So `competition_field_pattern_v1` reports the **shape** of the field, and
+every pattern carries **both** readings, permanently paired and never ranked.
+The refusal is structural rather than prose: no pattern maps to a number, no
+ordering over the patterns exists, and AST guards assert that no comparison,
+sort, or ranking expression in the module ever consumes one. A consumer that
+wants a preference between two fields must supply the missing facts itself.
+
+#### Observable evidence is not a conclusion
+
+Saturation, entry difficulty, win probability, differentiation room,
+competitor strength, competitor revenue and available market share all
+require facts nobody here can observe: how many buyers exist, what they would
+switch for, how strong each competitor actually is, and what the operator can
+build. All seven are permanent `UNKNOWN` markers on every result.
+
+#### Seven field shapes, none of them ranked
+
+`UNKNOWN_FIELD`, `NO_LISTINGS_OBSERVED`, `SPARSE_FIELD`,
+`FIELD_STRUCTURE_UNKNOWN`, `CONCENTRATED_FIELD`, `CROWDED_FIELD`,
+`FRAGMENTED_FIELD`. The classifier's rule order is an explainability device,
+not an order over the patterns it returns.
+
+#### Structure is never inferred from a minority of the field
+
+A structural claim requires at least `MIN_ATTRIBUTED_SHARE_FOR_STRUCTURE`
+(0.5) of the listings to carry a seller. Found by adversarially probing this
+milestone's own implementation: a field of 20 listings where the marketplace
+attributed only 2 — both to one seller — classified as `CONCENTRATED_FIELD`,
+a structural finding built on 10% of the evidence with the other 90% silently
+treated as if it did not exist. Computing the share over *all* listings
+instead would commit the same error in the opposite direction, reporting an
+unattributed field as not concentrated. Missing attribution is missing, so
+below the floor the field is `FIELD_STRUCTURE_UNKNOWN` and
+`seller_attribution_share` reports how much of the field the concentration
+statistics actually describe.
+
+Listings the marketplace did not attribute are never merged into one
+fictional seller, and `top_seller_listing_share` is `null` — unknown, never
+zero — when no listing carries one.
+
+#### What 4E deliberately does not compute
+
+Review counts, ratings and purchase proxies belong to 4A; prices and price
+bands to 4B; reachable channels and endpoints to 4D. An AST guard asserts the
+module never reads a price, review count or rating, so a competition finding
+can never be another milestone's finding wearing a new name.
+
+`competing_listing_count` and `seller_count_in_field` are, by construction,
+the **same numbers** as 4A's `relevant_comparable_count` and
+`distinct_seller_count` — both come from the shared `collect_listing_views`
+and the same `is_format_relevant` predicate. They are restated so the
+concentration features are interpretable without joining to 4A, **not** as
+independent corroboration, and a regression test pins them together so the
+two milestones can never disagree about what the marketplace showed.
+
+`top_seller_listing_share` is a share of **listings** — supply structure. It
+is not 4A's `top_seller_proxy_share`, which is a share of observed review
+volume over a different population; a regression test builds a field where
+one seller holds most listings while another holds most review volume, and
+asserts the two statistics diverge.
+
+Nothing temporal is computed. Listing age and established-listing counts
+already exist in 4A answering a purchase question; a second age statistic
+answering a competition question is deferred rather than duplicated.
+
+Search-demand `competition` / `competition_index` is deliberately excluded
+from V1: it measures **advertiser** bidding, not marketplace supply, and 4D
+already reports auction presence as `paid_auction_observed`.
+
+#### V1 assumptions
+
+Every threshold is an unvalidated assumption chosen by inspection, calibrated
+against no outcome data, and decides only which shape is reported — never
+whether that shape is good: `SPARSE_MAX_LISTINGS` (3),
+`DOMINANT_SELLER_LISTING_SHARE` (0.6), `CROWDED_MIN_LISTINGS` (12),
+`CROWDED_MIN_SELLERS` (6), `MIN_ATTRIBUTED_SHARE_FOR_STRUCTURE` (0.5).
+Treating a distinct `seller_id` as one competitor is likewise an unvalidated
+assumption: one operator running several storefronts counts as several
+sellers.
+
+#### Additive API change
+
+`POST /research/preliminary` returns one additional field,
+`competition_opportunity`. No existing field is removed, renamed, or retyped,
+no endpoint is added or changed, and there is no schema migration. As with
+`buyer_reach`, the field is **required** because the derivation always
+reports an outcome — `NOT_REQUESTED` and `DERIVATION_ERROR` included — so
+additive-tolerant clients are unaffected while schema-strict consumers will
+see one new array.
+
+#### Known limitations
+
+- Marketplace search results are a provider-ordered sample, not the full
+  market, so a sparse field is weak evidence of an unserved need and a
+  crowded one is weak evidence of the field's true size.
+- The patterns describe supply only. Nothing here observes demand, so no
+  pattern can be read as a supply-versus-demand balance.
+- `FIELD_STRUCTURE_UNKNOWN` reports that attribution was too thin to
+  characterize the field. It is not a statement that the field is
+  unstructured.
+- Competitor performance is not public, so a dominant seller's strength is
+  unknown and `CONCENTRATED_FIELD` says only that one seller holds most of
+  the observable listings.
+
 ### Known technical debt
 
 - **Unbounded in-memory research store and its indexes.** `ResearchStore` is
@@ -981,6 +1108,36 @@ array and may need updating.
   would make two milestones order identifiers differently from a third.
   Deferred deliberately: consolidating it touches three shipped derivations at
   once and belongs in a change reviewed for that, not in a documentation pass.
+- **`_id_sort_key` now exists in a fourth module.** Milestone 4E adds its own
+  copy in `app/services/competition_opportunity.py`, for the same reason and
+  with the same body as the 4A/4B/4D copies. The entry above applies
+  unchanged; consolidating it now touches four shipped derivations.
+- **Identifier types are canonical in the services and `str` at the API
+  boundary.** Milestone 4D-0.1 established that identifier values keep
+  whatever type the provider payload carried and only their ORDER is
+  canonical, and 4E's service layer honours that — a mixed `int`/`str`
+  seller id orders deterministically rather than raising. The response
+  models, however, declare `listing_ids: list[str]` and `seller_ids:
+  list[str]`, so a non-string identifier reaching the API layer would fail
+  response validation. This is pre-existing and repository-wide: 4A and 4B
+  declare their identifier lists the same way. It is unreachable through
+  `POST /research/preliminary`, where identifiers come from
+  `MarketplaceListing.seller_id` typed `str | None`. Deferred deliberately:
+  widening the declared types is one change across three shipped response
+  schemas, not a 4E-local fix.
+- **Structural features restate two 4A counts.** `competing_listing_count`
+  and `seller_count_in_field` are the same numbers as 4A's
+  `relevant_comparable_count` and `distinct_seller_count`, by construction
+  rather than by coincidence. A regression test pins them equal, so the
+  duplication is a maintained invariant rather than a drift risk, but a
+  future consumer joining both derivations will see each count twice.
+- **Top-level `missing_reason` granularity, again.** As with 4D, 4E's
+  document-level `missing_reason` does not distinguish a capability that ran
+  and returned nothing from one whose listings were all excluded as an
+  unrelated format — those carry distinct reasons, but a field absent from an
+  individual payload (a listing with no `seller_id`) is visible only in
+  `seller_attribution_share`, not in `missing_reason`. A granularity
+  limitation, not a correctness failure: no absence becomes a zero.
 
 ## Run locally
 

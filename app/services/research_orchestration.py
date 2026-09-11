@@ -63,6 +63,10 @@ from app.services.preliminary_ranking import (
 )
 from app.services.public_content import run_public_content_research
 from app.services.buyer_reach import BuyerReachResult, extract_buyer_reach
+from app.services.competition_opportunity import (
+    CompetitionOpportunityResult,
+    extract_competition_opportunity,
+)
 from app.services.price_evidence import (
     PriceEvidenceResult,
     extract_price_evidence,
@@ -105,6 +109,7 @@ STATUS_UNEXPECTED_PROVIDER_ERROR = "UNEXPECTED_PROVIDER_ERROR"
 DERIVATION_PURCHASE_EVIDENCE = "purchase_evidence"
 DERIVATION_PRICE_EVIDENCE = "price_evidence"
 DERIVATION_BUYER_REACH = "buyer_reach"
+DERIVATION_COMPETITION_OPPORTUNITY = "competition_opportunity"
 STATUS_DERIVATION_COMPLETE = "COMPLETE"
 STATUS_DERIVATION_NOT_REQUESTED = "NOT_REQUESTED"
 STATUS_DERIVATION_ERROR = "DERIVATION_ERROR"
@@ -290,6 +295,9 @@ class PreliminaryResearchResult:
     # Milestone 4B: Price Evidence, derived for the selected candidates only.
     price_evidence: dict[UUID, PriceEvidenceResult] = field(default_factory=dict)
     buyer_reach: dict[UUID, BuyerReachResult] = field(default_factory=dict)
+    competition_opportunity: dict[UUID, CompetitionOpportunityResult] = field(
+        default_factory=dict
+    )
     derivations: list[DerivationOutcome] = field(default_factory=list)
     orchestration_version: str = ORCHESTRATION_VERSION
     dimensions_version: str = PRELIMINARY_DIMENSIONS_VERSION
@@ -424,6 +432,7 @@ async def run_preliminary_research(
     derive_purchase_evidence: bool = True,
     derive_price_evidence: bool = True,
     derive_buyer_reach: bool = True,
+    derive_competition_opportunity: bool = True,
 ) -> PreliminaryResearchResult:
     """Coordinate every available evidence capability, then rank deterministically.
 
@@ -630,23 +639,42 @@ async def run_preliminary_research(
         DERIVATION_PRICE_EVIDENCE, derive_price_evidence, extract_price_evidence
     )
 
-    # Milestone 4D needs one thing the other derivations do not: WHY a
-    # capability produced nothing. Without it a failed capability would read
-    # as an absent channel, and missing evidence would silently become zero
-    # reach. The reasons are bound here rather than by widening the generic
-    # runner, so 4A and 4B keep their existing two-argument contract.
-    reach_missing_reasons = _capability_missing_reasons(failed_capabilities, outcomes)
+    # Milestones 4D and 4E need one thing 4A and 4B do not: WHY a capability
+    # produced nothing. Without it a failed capability would read as an absent
+    # channel or an empty competitive field, and missing evidence would
+    # silently become zero. One map serves both, so they can never disagree
+    # about what a capability reason is. It is bound here rather than by
+    # widening the generic runner, so 4A and 4B keep their two-argument
+    # contract.
+    capability_missing_reasons = _capability_missing_reasons(
+        failed_capabilities, outcomes
+    )
 
     def extract_reach(candidate_id, evidence):
         return extract_buyer_reach(
             candidate_id=candidate_id,
             evidence=evidence,
-            missing_reasons=reach_missing_reasons,
+            missing_reasons=capability_missing_reasons,
             research_run_id=run_id,
         )
 
     buyer_reach = run_derivation(
         DERIVATION_BUYER_REACH, derive_buyer_reach, extract_reach
+    )
+
+    # 4E consumes only the marketplace capability, but takes the whole map:
+    # one source of truth for both derivations.
+    def extract_competition(candidate_id, evidence):
+        return extract_competition_opportunity(
+            candidate_id=candidate_id,
+            evidence=evidence,
+            missing_reasons=capability_missing_reasons,
+        )
+
+    competition_opportunity = run_derivation(
+        DERIVATION_COMPETITION_OPPORTUNITY,
+        derive_competition_opportunity,
+        extract_competition,
     )
 
     return PreliminaryResearchResult(
@@ -658,6 +686,7 @@ async def run_preliminary_research(
         purchase_evidence=purchase_evidence,
         price_evidence=price_evidence,
         buyer_reach=buyer_reach,
+        competition_opportunity=competition_opportunity,
         derivations=derivations,
     )
 

@@ -201,9 +201,32 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - Dimension name is `preliminary_buyer_reach`, never `buyer_reach`, so it
   cannot be wired into the legacy `ScoreDimensions.buyer_reach` weight
 
-### Milestone 4E — Competition opportunity (not started)
-- Formalize competition as evidence, distinct from 4D channel presence and
-  from 4A seller concentration. Not started
+### Milestone 4E — Competition opportunity (complete)
+- `app/services/competition_opportunity.py`, `competition_opportunity_v1`: a
+  deterministic derivation over marketplace evidence 3A collected and 3C
+  resolved. No provider, no provider call, no endpoint, no persistence
+- Returned by `POST /research/preliminary` under `competition_opportunity`,
+  as a fourth independent `DerivationOutcome` behind the same failure
+  boundary as 4A/4B/4D
+- Competition is modelled NON-LINEARLY. `competition_field_pattern_v1`
+  reports the SHAPE of the field, and every pattern carries two opposed
+  readings that are emitted together and never ranked. No pattern maps to a
+  number and no ordering over the patterns exists; AST guards enforce both
+- Observable evidence is kept apart from conclusions: `saturation`,
+  `entry_difficulty`, `win_probability`, `differentiation_opportunity`,
+  `competitor_strength`, `competitor_revenue` and `market_share_available`
+  are permanent UNKNOWN markers
+- Reuses `collect_listing_views`, so 4A, 4B and 4E can never disagree about
+  what a listing is. An AST guard proves the module reads no price, review
+  count or rating, so it cannot restate a 4A, 4B or 4D finding
+- Structural claims require at least half the listings to carry a seller;
+  below that the field is FIELD_STRUCTURE_UNKNOWN rather than a shape
+  inferred from a minority of the evidence
+- No score: `value` is permanently `None`, state is
+  EVIDENCE_PRESENT_UNSCORED. No POS, ECS, or RED/YELLOW/GREEN
+- Dimension name is `preliminary_competition_opportunity`, never
+  `competition_opportunity`, so it cannot be wired into the legacy
+  `ScoreDimensions.competition_opportunity` weight
 
 ### Milestone 4F — Audience interest formalization (not started)
 - Formalize the 3C preliminary audience-interest dimension into an evidence
