@@ -1214,6 +1214,127 @@ because the derivation always reports an outcome.
 - Temporal spread (`publish_span_days`, `distinct_publish_months`) records
   when content appeared. It is never evidence that attention persisted.
 
+Milestone 4G (problem/product fit evidence) is implemented:
+
+- A deterministic Problem/Product Fit assessment
+  (`app/services/product_job_fit.py`, `product_job_fit_v1`) over a Milestone
+  4C specification and the structured evidence behind it. No provider call,
+  no quota, no new endpoint, no persistence
+- Returned by `POST /product/specification` under `product_job_fit`, behind
+  its own failure boundary: a bug in the assessment degrades the assessment
+  alone and never breaks an endpoint that already produced a specification
+
+#### Four things kept strictly apart
+
+| | |
+| --- | --- |
+| observed market evidence | what a provider actually returned |
+| inferred problem/job | Milestone 4C's `job_to_be_done_v1` derivation |
+| generated specification | Milestone 4C's template-generated document |
+| fit assessment | this milestone |
+
+4G is the **first milestone permitted to consume 4C**, because its whole
+purpose is to evaluate the relationship between the proposed product and the
+evidence-backed job. That permission comes with the obligation that makes it
+safe: consuming generated text must never launder it into evidence. This
+module reads only 4C's structured result — claim classes, job scores, format
+enums, conflict topics, which fields are UNKNOWN — and never a generated
+string. A test plants a distinctive invented phrase in a specification, in
+both the field-known and field-UNKNOWN paths, and asserts it appears nowhere
+in the serialized assessment.
+
+Every claim is capped through **4C's own `cap_claim_class`** against the
+inputs it rests on, so a fit claim is never stronger than its weakest link,
+and the assessment itself is always INFERRED even when every contributing
+record was OBSERVED.
+
+#### What is assessable, and what would be a tautology
+
+Milestone 4C chooses a format **from** the job via `JOB_TO_IDEAL_FORMAT`, so
+asking "does the format match the job?" is answered YES by construction and
+measures nothing. 4G assesses the **support chain** that choice rests on:
+
+1. is the job backed by observed provider text, or only by candidate text?
+2. was the classification close enough that the format choice was arbitrary?
+3. is the ideal format buildable — and if not, does the V1 substitute
+   preserve what the job actually needs?
+4. is the specification complete enough for any of this to mean anything?
+
+`fit_assessment_pattern_v1` reports the **first break** in that chain. The
+complete set of findings is emitted separately as `observations`, each with
+its own claim class and its own `does_not_establish` line, so summarizing
+loses nothing.
+
+#### Structural fit is derived, not asserted
+
+`interaction_mode_v1` states how each format is used — `STATIC_REFERENCE`,
+`FILL_IN`, `SEQUENCED_EXECUTION`, `ARTEFACT_PRODUCTION`,
+`REPEATED_COMPUTATION`, `TIME_SEQUENCED_DELIVERY`, `ONGOING_SERVICE`,
+`ONGOING_INTERACTION` — and substitution fidelity follows from comparing the
+two modes rather than being asserted pair by pair:
+
+| Substitution | Fidelity | Why |
+| --- | --- | --- |
+| `PDF_GUIDE` → `PDF_GUIDE` | `DIRECT` | no substitution happened |
+| `CALCULATOR` → `SPREADSHEET_TOOL` | `MODE_PRESERVED` | both perform repeated computation |
+| `TEMPLATE_PACK` → `PDF_GUIDE` | `MODE_CHANGED` | producing an artefact becomes reading one |
+| `COMMUNITY` → `PDF_GUIDE` | `MODE_UNMET` | ongoing interaction is not something a document provides |
+| `MINI_COURSE` → `WORKBOOK` | `MODE_UNMET` | a schedule is not a set of pages |
+
+The three modes no V1-buildable artefact can provide —
+`TIME_SEQUENCED_DELIVERY`, `ONGOING_SERVICE`, `ONGOING_INTERACTION` — are
+listed explicitly, and a test asserts no buildable format claims one.
+
+#### Weak or ambiguous job classification is exposed, not inherited
+
+4C classifies a job on a lead of one token over the runner-up. A win by
+exactly that margin is a real classification that was one token from going
+the other way, so 4G reports `job_is_ambiguous` with the margin and names
+every competing job within it — and because the format follows the job, that
+is also a statement that the recommended format would have differed. A
+specification whose job came only from the candidate's own wording reports
+`JOB_ASSUMED_NOT_OBSERVED`: the fit assessed is fit to a hypothesis.
+
+#### What 4G never claims
+
+`sales_probability`, `conversion_probability`, `product_market_fit`,
+`willingness_to_pay`, `market_size`, `expected_revenue`,
+`usefulness_to_buyer` and `buyer_demand_proven` are permanent `UNKNOWN`
+markers. A test scans every string the API returns, across every pattern, for
+commercial-success vocabulary. Even the strongest pattern,
+`ALIGNED_WITH_OBSERVED_JOB`, states in its own boundary that it is not
+product-market fit, not demand, and not evidence the product would sell — a
+product can suit a job perfectly and sell nothing.
+
+Search volume, views, review counts, listing counts and price magnitudes are
+**not read at all**, proven by an AST guard. They can make a market look
+bigger; they can never make a product structurally more suitable for a job.
+
+#### V1 assumptions
+
+`AMBIGUITY_MAX_LEAD` (1) and the `interaction_mode_v1` taxonomy itself are
+unvalidated assumptions chosen by inspection, calibrated against no outcome
+data. They describe structure; they never rank product quality. Milestone
+4C's own unvalidated job taxonomy and format-selection heuristic are
+inherited wholesale, so 4G is at most as good as they are.
+
+#### Additive API change
+
+`POST /product/specification` returns one additional field,
+`product_job_fit`. No existing field is removed, renamed, or retyped, no
+endpoint is added or changed, and there is no schema migration.
+
+#### Known limitations
+
+- The job being fitted is 4C's INFERRED derivation, not an observed fact
+  about buyers. Fit to an inferred job is inferred fit.
+- The specification being assessed is generated. Consuming it never makes its
+  text evidence.
+- A recommendation that diverges from the observed market is reported as a
+  fact, and is neither a defect nor an advantage.
+- Structural suitability says nothing about execution quality: a well-fitted
+  format can still be built badly.
+
 ### Known technical debt
 
 - **Unbounded in-memory research store and its indexes.** `ResearchStore` is
@@ -1261,6 +1382,20 @@ because the derivation always reports an outcome.
   more-views-is-better reading 4F exists to avoid. Reconciling them means
   changing ranking behaviour, which is out of scope for a derivation
   milestone and belongs in the scoring milestone.
+- **4G is reachable only through `POST /product/specification`.** Unlike
+  4A/4B/4D/4E/4F, which run as derivations inside `POST /research/preliminary`,
+  the fit assessment needs a 4C specification and 4C is not part of the
+  preliminary orchestration. Wiring it there would mean generating a
+  specification per selected candidate inside the research run, which is new
+  behaviour rather than a derivation over stored evidence. Deferred
+  deliberately; revisit if a consumer needs fit for every ranked candidate.
+- **4G inherits two unvalidated 4C taxonomies wholesale.** `job_to_be_done_v1`
+  and `format_selection_v1` decide the job and the format that 4G then
+  assesses, so a systematic error in either propagates into every fit result.
+  4G reports the weakness (ambiguity margins, ASSUMED classifications) but
+  cannot correct it. Any future calibration of the job taxonomy must re-run
+  4G's reachability tests, because a change in claim-class behaviour is what
+  made an earlier version of the classifier dead code.
 - **`_id_sort_key` now exists in a fourth module.** Milestone 4E adds its own
   copy in `app/services/competition_opportunity.py`, for the same reason and
   with the same body as the 4A/4B/4D copies. The entry above applies

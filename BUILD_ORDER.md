@@ -259,6 +259,37 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   `ScoreDimensions.audience_interest` nor 3C's scored
   `preliminary_audience_interest`, which this milestone leaves untouched
 
+### Milestone 4G — Problem/product fit evidence (complete)
+- `app/services/product_job_fit.py`, `product_job_fit_v1`: a deterministic
+  assessment of whether a 4C specification is STRUCTURALLY appropriate for
+  the job its own evidence supports. No provider, no network, no persistence
+- Returned by `POST /product/specification` under `product_job_fit`, behind
+  its own boundary so an assessment bug cannot break an endpoint that already
+  produced a valid specification
+- The first milestone permitted to consume 4C, because its purpose is to
+  evaluate the relationship between the proposed product and the
+  evidence-backed job. It reads only 4C's STRUCTURED result — claim classes,
+  job scores, format enums, conflict topics, which fields are UNKNOWN — and
+  never a generated string
+- Assesses the SUPPORT CHAIN rather than re-checking the format against the
+  job, which 4C chose FROM the job and would therefore answer YES by
+  construction. `fit_assessment_pattern_v1` reports the FIRST break in that
+  chain; the complete set of findings is emitted separately as observations
+- Structural fit is derived from `interaction_mode_v1`, an explicit taxonomy
+  of how each format is used, so substitution fidelity follows from a stated
+  property rather than being asserted pair by pair. A spreadsheet preserves a
+  calculator's repeated computation; a PDF cannot provide a community's
+  ongoing interaction
+- Never claims sales, conversion, product-market fit, willingness to pay,
+  market size, revenue, usefulness, or proven demand: eight permanent UNKNOWN
+  markers, and no emitted string may carry commercial-success vocabulary
+- Reads no magnitude — search volume, views, review counts, listing counts
+  and prices cannot make a product structurally more suitable for a job
+- No score: `value` is permanently `None`, state is
+  EVIDENCE_PRESENT_UNSCORED. No POS, ECS, or RED/YELLOW/GREEN
+- Dimension name is `preliminary_product_job_fit`, never `product_market_fit`
+  and never the legacy `ScoreDimensions.problem_product_fit`
+
 ## Milestone 5 — Faceless content intelligence
 - YouTube creator baseline
 - Robust outlier scoring

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -37,6 +38,7 @@ from app.services.marketplace_features import (
 )
 from app.services.preliminary_dimensions import (
     CandidatePreliminaryProfile,
+    DimensionState,
     PreliminaryDimension,
 )
 from app.services.preliminary_ranking import (
@@ -65,9 +67,19 @@ from app.services.price_evidence import (
     PriceEvidenceResult,
     extract_price_evidence,
 )
+from app.services.product_job_fit import (
+    LIMITATIONS as FIT_LIMITATIONS,
+    PATTERN_BOUNDARIES,
+    FitObservation,
+    FitPattern,
+    ProductJobFitFeatures,
+    ProductJobFitResult,
+    extract_product_job_fit,
+)
 from app.services.product_specification import (
     EvidenceOwnershipError,
     ProductSpecification,
+    SpecClaimClass,
     SpecField,
     generate_product_specification,
 )
@@ -83,6 +95,8 @@ from app.services.research_orchestration import (
     CAPABILITY_SEARCH_DEMAND,
     STATUS_UNEXPECTED_PROVIDER_ERROR,
     CapabilityCaps,
+    safe_exception_message,
+    sanitize_error_message,
     CapabilityOutcome,
     DerivationOutcome,
     run_preliminary_research,
@@ -90,6 +104,8 @@ from app.services.research_orchestration import (
 from app.services.search_demand import run_search_demand_research
 from app.services.search_demand_features import SearchDemandSummary
 from app.storage.memory import ResearchStore
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -2143,8 +2159,167 @@ class ProductSpecificationOut(BaseModel):
         )
 
 
+class FitObservationOut(BaseModel):
+    """One finding about the support chain, with its own claim class.
+
+    `does_not_establish` is always present so no finding can be read as a
+    commercial conclusion.
+    """
+
+    topic: str
+    finding: str
+    claim_class: str
+    does_not_establish: str
+
+    @classmethod
+    def from_observation(cls, o: FitObservation) -> "FitObservationOut":
+        return cls(
+            topic=o.topic,
+            finding=o.finding,
+            claim_class=o.claim_class.value,
+            does_not_establish=o.does_not_establish,
+        )
+
+
+class ProductJobFitFeaturesOut(BaseModel):
+    """Structural properties of the support chain. No magnitudes anywhere.
+
+    Counts here count CITED EVIDENCE RECORDS and TOKENS. None of them is a
+    market size, an audience, or a demand figure.
+    """
+
+    job: str | None
+    job_claim_class: str
+    job_supported_by_observed_evidence: bool
+    job_citation_count: int
+    job_matched_token_count: int
+
+    job_score_lead: int | None
+    job_is_ambiguous: bool
+    competing_jobs: list[str]
+
+    ideal_format: str | None
+    buildable_format: str | None
+    outside_v1_build_capability: bool
+    ideal_interaction_mode: str | None
+    buildable_interaction_mode: str | None
+    # Names which structural property survived substitution. Not a ranking,
+    # and deliberately never a number.
+    substitution_fidelity: str
+
+    unknown_specification_fields: list[str]
+    known_specification_field_count: int
+    specification_insufficient_evidence: bool
+
+    conflict_count: int
+    conflict_topics: list[str]
+
+    # Reported, never ranked: 4C follows the job rather than the market.
+    diverges_from_observed_market: bool
+    features_version: str
+
+    @classmethod
+    def from_features(cls, f: ProductJobFitFeatures) -> "ProductJobFitFeaturesOut":
+        return cls(
+            job=f.job,
+            job_claim_class=f.job_claim_class.value,
+            job_supported_by_observed_evidence=f.job_supported_by_observed_evidence,
+            job_citation_count=f.job_citation_count,
+            job_matched_token_count=f.job_matched_token_count,
+            job_score_lead=f.job_score_lead,
+            job_is_ambiguous=f.job_is_ambiguous,
+            competing_jobs=list(f.competing_jobs),
+            ideal_format=f.ideal_format,
+            buildable_format=f.buildable_format,
+            outside_v1_build_capability=f.outside_v1_build_capability,
+            ideal_interaction_mode=f.ideal_interaction_mode,
+            buildable_interaction_mode=f.buildable_interaction_mode,
+            substitution_fidelity=f.substitution_fidelity.value,
+            unknown_specification_fields=list(f.unknown_specification_fields),
+            known_specification_field_count=f.known_specification_field_count,
+            specification_insufficient_evidence=f.specification_insufficient_evidence,
+            conflict_count=f.conflict_count,
+            conflict_topics=list(f.conflict_topics),
+            diverges_from_observed_market=f.diverges_from_observed_market,
+            features_version=f.features_version,
+        )
+
+
+class ProductJobFitOut(BaseModel):
+    candidate_id: UUID
+    state: str
+    # Always null: a number here would read as a probability of success,
+    # which is exactly the claim this milestone refuses to make.
+    value: float | None
+    # Where the support chain first breaks. Not a ranking, and
+    # ALIGNED_WITH_OBSERVED_JOB is not a recommendation.
+    pattern: str
+    pattern_boundary: str
+    observations: list[FitObservationOut]
+    features: ProductJobFitFeaturesOut | None
+
+    # Capped against every 4C input; never stronger than its weakest link.
+    fit_claim_class: str
+    # Always INFERRED: a derivation that consumed generated text.
+    assessment_truth_class: str
+
+    # Permanent UNKNOWN markers. Structural suitability is not demand.
+    sales_probability: str
+    conversion_probability: str
+    product_market_fit: str
+    willingness_to_pay: str
+    market_size: str
+    expected_revenue: str
+    usefulness_to_buyer: str
+    buyer_demand_proven: str
+
+    missing_reason: str | None
+    limitations: list[str]
+    dimension_name: str
+    version: str
+    pattern_version: str
+    interaction_mode_version: str
+
+    @classmethod
+    def from_result(cls, r: ProductJobFitResult) -> "ProductJobFitOut":
+        return cls(
+            candidate_id=r.candidate_id,
+            state=r.state.value,
+            value=r.value,
+            pattern=r.pattern.value,
+            pattern_boundary=r.pattern_boundary,
+            observations=[
+                FitObservationOut.from_observation(o) for o in r.observations
+            ],
+            features=(
+                ProductJobFitFeaturesOut.from_features(r.features)
+                if r.features is not None
+                else None
+            ),
+            fit_claim_class=r.fit_claim_class.value,
+            assessment_truth_class=r.assessment_truth_class.value,
+            sales_probability=r.sales_probability.value,
+            conversion_probability=r.conversion_probability.value,
+            product_market_fit=r.product_market_fit.value,
+            willingness_to_pay=r.willingness_to_pay.value,
+            market_size=r.market_size.value,
+            expected_revenue=r.expected_revenue.value,
+            usefulness_to_buyer=r.usefulness_to_buyer.value,
+            buyer_demand_proven=r.buyer_demand_proven.value,
+            missing_reason=r.missing_reason,
+            limitations=list(r.limitations),
+            dimension_name=r.dimension_name,
+            version=r.version,
+            pattern_version=r.pattern_version,
+            interaction_mode_version=r.interaction_mode_version,
+        )
+
+
 class ProductSpecificationResponse(BaseModel):
     specification: ProductSpecificationOut
+    # Milestone 4G: structural fit between the specification and the job its
+    # own evidence supports. Never product-market fit.
+    product_job_fit: ProductJobFitOut
 
 
 @router.post("/product/specification", response_model=ProductSpecificationResponse)
@@ -2205,6 +2380,36 @@ def product_specification(
         # Inline evidence for a different candidate: a caller error, not a
         # data condition. Refuse rather than cite it.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    # Milestone 4G assesses the specification just generated. It runs behind
+    # its own boundary: a bug in the assessment degrades the assessment
+    # alone, and must never take down an endpoint that already produced a
+    # valid specification.
+    try:
+        fit = extract_product_job_fit(
+            candidate_id=candidate.id, specification=specification
+        )
+    except Exception as exc:  # noqa: BLE001 - deliberate assessment boundary
+        error_id = uuid4()
+        logger.exception(
+            "Unexpected error in product_job_fit assessment (error_id=%s)", error_id
+        )
+        fit = ProductJobFitResult(
+            candidate_id=candidate.id,
+            state=DimensionState.MISSING,
+            value=None,
+            pattern=FitPattern.ASSESSMENT_UNAVAILABLE,
+            pattern_boundary=PATTERN_BOUNDARIES[FitPattern.ASSESSMENT_UNAVAILABLE],
+            observations=(),
+            features=None,
+            fit_claim_class=SpecClaimClass.UNKNOWN,
+            missing_reason=(
+                f"{type(exc).__name__}: "
+                f"{sanitize_error_message(safe_exception_message(exc))} "
+                f"(error_id={error_id})"
+            ),
+            limitations=FIT_LIMITATIONS,
+        )
     return ProductSpecificationResponse(
-        specification=ProductSpecificationOut.from_specification(specification)
+        specification=ProductSpecificationOut.from_specification(specification),
+        product_job_fit=ProductJobFitOut.from_result(fit),
     )
