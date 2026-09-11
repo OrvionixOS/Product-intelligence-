@@ -1473,6 +1473,14 @@ excluded from pattern extraction and counted separately, so a data-quality
 problem is never hidden behind a data-absence one. The three counts are
 disjoint and sum to the observed video count.
 
+Duplicate suppression retains the **smallest evidence id** in each
+fingerprint group rather than whichever record arrived first. Byte-identical
+payloads hash identically but still occupy distinct rows, so re-collecting one
+video produces records differing only by id; a first-wins rule left every
+count, share and state correct while the retained *lineage* flipped with
+arrival order. A record with no payload hash is never collapsed at all, since
+without one no two records can be shown to describe the same observation.
+
 #### Milestone 5A evidence is verified before it is consumed
 
 A `RobustContentIntelligenceResult` carries its own `candidate_id` and

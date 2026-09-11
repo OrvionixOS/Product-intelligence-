@@ -665,6 +665,161 @@ def test_duplicate_video_identity_across_records_is_one_video():
     assert {o.video_id for o in token.occurrences} == {"SAME", "OTHER"}
 
 
+# Fixed ids so "smallest" is unambiguous and independent of uuid4().
+_ID_SMALL = UUID("00000000-0000-4000-8000-00000000000a")
+_ID_MIDDLE = UUID("88888888-8888-4888-8888-88888888888b")
+_ID_LARGE = UUID("ffffffff-ffff-4fff-8fff-ffffffffffff")
+
+
+def _duplicate_content_rows(
+    candidate_id: UUID, video_id: str, item_ids, *, hashed: bool = True, **kwargs
+) -> list[EvidenceItem]:
+    """Byte-identical OBSERVED content rows for one video, distinct row ids.
+
+    The payload is the same object for every row, so the payload hash is the
+    same too; only the evidence id differs. This is what re-collecting one
+    video across two queries or snapshots actually produces.
+
+    `hashed=False` strips the payload hash, since `video_evidence` always
+    substitutes one and a record without a hash is never collapsed.
+    """
+    template = next(
+        item
+        for item in video_evidence(video_id, candidate_id=candidate_id, **kwargs)
+        if item.signal_type == "public_content_observation"
+    )
+    update: dict[str, Any] = {} if hashed else {"raw_payload_hash": None}
+    return [
+        template.model_copy(update={**update, "id": item_id})
+        for item_id in item_ids
+    ]
+
+
+def test_duplicate_rows_retain_the_smallest_evidence_id_not_the_first_seen():
+    """Suppression must not make LINEAGE depend on arrival order.
+
+    Identical payloads hash identically but occupy distinct rows. A
+    first-wins rule left every count, share, state and pattern correct while
+    the retained evidence id — and therefore the audit trail — flipped when
+    the same records arrived in a different order.
+    """
+    candidate_id = uuid4()
+    dupes = _duplicate_content_rows(
+        candidate_id, "SAME", [_ID_LARGE, _ID_SMALL, _ID_MIDDLE],
+        channel_id="UC_A", title="meal plan guide",
+    )
+    # One fingerprint, three rows.
+    assert len({d.raw_payload_hash for d in dupes}) == 1
+    assert len({d.id for d in dupes}) == 3
+    peer = _duplicate_content_rows(
+        candidate_id, "PEER", [uuid4()], channel_id="UC_B", title="meal plan guide"
+    )
+    evidence = dupes + peer
+
+    result = run(evidence, candidate_id)
+    assert result.provenance.duplicate_evidence_suppressed == 2
+    assert result.observed_video_count == 2
+    # The smallest id is retained; the other two appear nowhere in lineage.
+    assert _ID_SMALL in result.provenance.evidence_ids
+    assert _ID_MIDDLE not in result.provenance.evidence_ids
+    assert _ID_LARGE not in result.provenance.evidence_ids
+    token = pattern_for(result, PatternKind.TITLE_TOKEN, "meal")
+    same = next(o for o in token.occurrences if o.video_id == "SAME")
+    assert same.evidence_ids == (_ID_SMALL,)
+    assert _ID_SMALL in token.evidence_ids
+
+
+def test_duplicate_fingerprints_are_order_independent_forward_reversed_shuffled():
+    candidate_id = uuid4()
+    evidence = _duplicate_content_rows(
+        candidate_id, "SAME", [_ID_LARGE, _ID_SMALL, _ID_MIDDLE],
+        channel_id="UC_A", title="meal plan guide",
+    ) + _duplicate_content_rows(
+        candidate_id, "PEER", [uuid4(), uuid4()],
+        channel_id="UC_B", title="meal plan guide",
+    )
+    baseline = _identity(run(evidence, candidate_id))
+    assert _identity(run(list(reversed(evidence)), candidate_id)) == baseline
+
+    rng = random.Random(5150)
+    for _ in range(300):
+        shuffled = list(evidence)
+        rng.shuffle(shuffled)
+        assert _identity(run(shuffled, candidate_id)) == baseline
+
+
+def test_the_same_record_supplied_twice_is_still_one_record():
+    """Identical ids, not merely identical payloads, stay a single record."""
+    candidate_id = uuid4()
+    row = _duplicate_content_rows(
+        candidate_id, "SAME", [_ID_SMALL], channel_id="UC_A", title="meal plan"
+    )
+    peer = _duplicate_content_rows(
+        candidate_id, "PEER", [_ID_LARGE], channel_id="UC_B", title="meal plan"
+    )
+    result = run(row + row + peer, candidate_id)
+    assert result.observed_video_count == 2
+    token = pattern_for(result, PatternKind.TITLE_TOKEN, "meal")
+    same = next(o for o in token.occurrences if o.video_id == "SAME")
+    assert same.evidence_ids == (_ID_SMALL,)
+    assert result.provenance.evidence_ids == tuple(sorted((_ID_SMALL, _ID_LARGE)))
+
+
+def test_records_without_a_payload_hash_are_never_collapsed():
+    """No hash means no identity claim, so multiplicity stays in lineage.
+
+    The fingerprint is only trustworthy when a payload hash exists. Without
+    one, two records cannot be shown to describe the same observation, so
+    neither may be suppressed: collapsing them would drop an evidence id and
+    inflate `duplicate_evidence_suppressed` for records that still contribute.
+    Milestone 5A keeps the same rule.
+    """
+    candidate_id = uuid4()
+    rows = _duplicate_content_rows(
+        candidate_id, "SAME", [_ID_SMALL, _ID_LARGE],
+        channel_id="UC_A", title="meal plan", hashed=False,
+    )
+    peer = _duplicate_content_rows(
+        candidate_id, "PEER", [_ID_MIDDLE], channel_id="UC_B", title="meal plan",
+        hashed=False,
+    )
+    assert all(r.raw_payload_hash is None for r in rows + peer)
+
+    result = run(rows + peer, candidate_id)
+    assert result.provenance.duplicate_evidence_suppressed == 0
+    assert result.observed_video_count == 2
+    token = pattern_for(result, PatternKind.TITLE_TOKEN, "meal")
+    same = next(o for o in token.occurrences if o.video_id == "SAME")
+    # BOTH ids survive; neither record was treated as a duplicate of the other.
+    assert same.evidence_ids == tuple(sorted((_ID_SMALL, _ID_LARGE)))
+    assert set(result.provenance.evidence_ids) == {_ID_SMALL, _ID_LARGE, _ID_MIDDLE}
+
+
+def test_hashless_records_that_disagree_still_conflict():
+    """Un-hashed records are compared on content, not collapsed by identity."""
+    candidate_id = uuid4()
+    first = _duplicate_content_rows(
+        candidate_id, "SAME", [_ID_SMALL], channel_id="UC_A",
+        title="alpha bravo", hashed=False,
+    )
+    second = _duplicate_content_rows(
+        candidate_id, "SAME", [_ID_LARGE], channel_id="UC_B",
+        title="delta echo", hashed=False,
+    )
+    peer = _duplicate_content_rows(
+        candidate_id, "PEER", [_ID_MIDDLE], channel_id="UC_C",
+        title="alpha bravo delta echo", hashed=False,
+    )
+    result = run(first + second + peer, candidate_id)
+    assert result.provenance.duplicate_evidence_suppressed == 0
+    same = next(
+        o for p in result.patterns for o in p.occurrences if o.video_id == "SAME"
+    )
+    assert same.channel_state is FieldState.CONFLICTING
+    assert same.channel_id is None
+    assert same.evidence_ids == tuple(sorted((_ID_SMALL, _ID_LARGE)))
+
+
 def _conflicting_corpus(candidate_id: UUID) -> list[EvidenceItem]:
     """Two distinct OBSERVED records disagreeing about the SAME video.
 
@@ -851,13 +1006,28 @@ def _mixed_corpus(candidate_id: UUID) -> list[EvidenceItem]:
                 tags=_UNSET if tags is None else tags,
             )
         )
+    # V0 was collected twice: byte-identical payloads, so one payload hash and
+    # two distinct row ids. Without this the permutation sweep never touches
+    # the deduplication path at all, because every other video has exactly one
+    # record and nothing is ever suppressed.
+    evidence.extend(
+        video_evidence(
+            "V0", candidate_id=candidate_id, channel_id="UC_A",
+            title="meal plan guide for busy parents", duration_seconds=300,
+            tags=["meal", "plan"],
+        )
+    )
     return evidence
 
 
 def test_output_is_identical_under_1000_arrival_order_permutations():
     candidate_id = uuid4()
     evidence = _mixed_corpus(candidate_id)
-    baseline = _identity(run(evidence, candidate_id))
+    first = run(evidence, candidate_id)
+    # The sweep is only meaningful if the corpus reaches the dedup path, so
+    # pin that here rather than trusting the fixture to keep doing it.
+    assert first.provenance.duplicate_evidence_suppressed > 0
+    baseline = _identity(first)
     rng = random.Random(20260911)
     mismatches = 0
     for _ in range(1000):
@@ -1360,6 +1530,68 @@ def test_versions_are_reported():
     assert result.duration_band_version == "duration_band_v1"
     assert result.cooccurrence_version == "outlier_cooccurrence_v1"
     assert result.features_truth_class is TruthClass.INFERRED
+
+
+def test_derived_features_are_inferred_never_observed():
+    """5B derives; it never re-observes.
+
+    Every input record here is OBSERVED, and the features extracted from
+    them are still INFERRED: normalizing, tokenizing and counting produce a
+    reading of the evidence, not a new observation. Promoting them to
+    OBSERVED would let a derived value claim the standing of something a
+    provider actually returned.
+
+    This invariant previously had exactly one assertion, as the last line of
+    a test about version strings, so a mutation flipping it to OBSERVED was
+    caught only incidentally.
+    """
+    # Populated: patterns extracted from OBSERVED records.
+    candidate_id, evidence = corpus(
+        ("V1", "UC_A", "meal plan"), ("V2", "UC_B", "meal plan")
+    )
+    populated = run(evidence, candidate_id)
+    assert populated.patterns
+    assert all(
+        item.truth_class is TruthClass.OBSERVED
+        for item in evidence
+        if item.signal_type == "public_content_observation"
+    )
+    assert populated.features_truth_class is TruthClass.INFERRED
+
+    # Observed videos, but nothing recurred.
+    single_id, single = corpus(("ONLY", "UC_A", "meal plan"))
+    lonely = run(single, single_id)
+    assert lonely.pattern_state is ContentPatternsState.NO_RECURRING_PATTERNS
+    assert lonely.observed_video_count == 1
+    assert lonely.features_truth_class is TruthClass.INFERRED
+
+    # Observed videos whose metadata the provider never returned.
+    bare_id = uuid4()
+    bare: list[EvidenceItem] = []
+    for index in range(2):
+        bare.extend(
+            video_evidence(
+                f"B{index}", candidate_id=bare_id, title=None, tags=_UNSET,
+                category=None, duration_seconds=_UNSET,
+            )
+        )
+    metadataless = run(bare, bare_id)
+    assert metadataless.pattern_state is ContentPatternsState.METADATA_UNAVAILABLE
+    assert metadataless.observed_video_count == 2
+    assert metadataless.features_truth_class is TruthClass.INFERRED
+
+    # Nothing observed at all: there is no derived feature to classify.
+    empty = run([], uuid4())
+    assert empty.pattern_state is ContentPatternsState.NO_CONTENT_OBSERVED
+    assert empty.features_truth_class is None
+
+    failed = run([], uuid4(), missing_reasons={PUBLIC_CONTENT: FAILED})
+    assert failed.pattern_state is ContentPatternsState.CONTENT_EVIDENCE_UNAVAILABLE
+    assert failed.features_truth_class is None
+
+    # No path may claim the features were observed.
+    for result in (populated, lonely, metadataless, empty, failed):
+        assert result.features_truth_class is not TruthClass.OBSERVED
 
 
 def test_5a_semantics_are_untouched_by_5b():

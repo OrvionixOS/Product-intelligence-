@@ -353,6 +353,10 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - Two OBSERVED records that disagree about the same video make that field
   CONFLICTING — reported and excluded, never resolved by arrival order, so
   the result is a function of the record SET rather than its sequence
+- Duplicate suppression retains the smallest evidence id per fingerprint, so
+  lineage is order-independent too; a record with no payload hash is never
+  collapsed. Derived features stay INFERRED on every path even though every
+  source record is OBSERVED
 - Milestone 5A evidence is consumed only after its candidate_id and
   research_run_id are verified against this derivation's scope; a mismatch
   is reported as OUTLIER_SCOPE_MISMATCH and no observation is read
@@ -365,9 +369,11 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - Channel aggregates (`channel_subscriber_count`, `channel_view_count`,
   `channel_video_count`) and engagement magnitudes are unreadable, enforced
   by an AST guard that also pins the exact payload keys read
-- 25 mutations of the milestone's guards were applied and all 25 were killed,
+- 30 mutations of the milestone's guards were applied and all 30 were killed,
   including reverting the concentration denominator, folding CONFLICTING
-  channel identity into ordinary absence, and declaring the dimension SCORED
+  channel identity into ordinary absence, declaring the dimension SCORED,
+  reverting duplicate retention to first-wins, and promoting derived features
+  to OBSERVED
 
 ### Remaining Milestone 5 scope
 - 30 production-ready experiments

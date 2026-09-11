@@ -644,13 +644,16 @@ def _collect_videos(
     Values are COLLECTED per field and resolved afterwards by `_resolve`, so
     two distinct OBSERVED records that disagree about the same video produce
     a CONFLICTING field rather than whichever value happened to arrive first.
-    """
-    by_video: dict[str, _VideoAccumulator] = {}
-    order: list[str] = []
-    seen: set[tuple] = set()
-    suppressed = 0
-    contributing: list[EvidenceItem] = []
 
+    Duplicate suppression retains the SMALLEST evidence id in each fingerprint
+    group rather than whichever record arrived first. Byte-identical payloads
+    hash identically but still occupy distinct rows, so re-collecting one
+    video yields several records that differ only by id; a first-wins rule
+    therefore made the retained LINEAGE a function of arrival order, even
+    though no count, share, state or pattern ever changed. Choosing by id
+    makes the whole result, lineage included, a function of the record SET.
+    """
+    eligible: list[tuple[str, EvidenceItem]] = []
     for item in evidence:
         if not _in_scope(item, candidate_id, research_run_id):
             continue
@@ -667,11 +670,40 @@ def _collect_videos(
         if video_id is None:
             continue
 
-        fingerprint = (item.signal_type, video_id, item.raw_payload_hash)
-        if item.raw_payload_hash is not None and fingerprint in seen:
-            suppressed += 1
+        eligible.append((video_id, item))
+
+    # Pick each fingerprint's representative before reading anything, so the
+    # choice cannot depend on the sequence the records arrived in.
+    retained: dict[tuple, EvidenceItem] = {}
+    suppressed = 0
+    for video_id, item in eligible:
+        if item.raw_payload_hash is None:
             continue
-        seen.add(fingerprint)
+        fingerprint = (item.signal_type, video_id, item.raw_payload_hash)
+        current = retained.get(fingerprint)
+        if current is None:
+            retained[fingerprint] = item
+            continue
+        suppressed += 1
+        if _id_sort_key(item.id) < _id_sort_key(current.id):
+            retained[fingerprint] = item
+
+    by_video: dict[str, _VideoAccumulator] = {}
+    order: list[str] = []
+    consumed: set[tuple] = set()
+    contributing: list[EvidenceItem] = []
+
+    for video_id, item in eligible:
+        if item.raw_payload_hash is not None:
+            fingerprint = (item.signal_type, video_id, item.raw_payload_hash)
+            # One contribution per fingerprint, and only from the retained
+            # representative. The same record supplied twice is still one
+            # record, exactly as before.
+            if fingerprint in consumed or retained[fingerprint].id != item.id:
+                continue
+            consumed.add(fingerprint)
+
+        payload = item.raw_payload or {}
         contributing.append(item)
 
         if video_id not in by_video:
