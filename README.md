@@ -912,6 +912,48 @@ candidate-relevant listing. Milestone 4A's `distinct_seller_count` counts a
 differ so the two can never be silently conflated, and a regression test
 demonstrates the difference.
 
+#### Additive API change
+
+`POST /research/preliminary` now returns one additional field, `buyer_reach`,
+alongside the existing `purchase_evidence` and `price_evidence` arrays. No
+existing field is removed, renamed, or retyped, no endpoint is added or
+changed, and there is no schema migration.
+
+`buyer_reach` is a **required** field on `PreliminaryResearchResponse`, because
+the derivation always reports an outcome — including `NOT_REQUESTED` and
+`DERIVATION_ERROR`, which are facts rather than absences and must not be
+silently omitted. A client that tolerates additive response fields is therefore
+unaffected. A schema-strict consumer — one validating the response against a
+pinned schema, or asserting a byte-for-byte response body — will see one new
+array and may need updating.
+
+#### Known limitations
+
+- **Top-level `missing_reason` is coarser than the channel level.** Two
+  distinct facts — a channel-relevant field being absent from a record that
+  *was* returned (`field_absent`), and a capability that ran and returned
+  nothing for this candidate (`ran_empty`) — currently surface the same
+  document-level `missing_reason`. They stay distinguishable per channel, so
+  neither collapses into an observed zero and neither fabricates zero reach:
+  one listing carrying no `seller_id` remains one listing whose storefront is
+  unknown, never "zero sellers". This is a **granularity** limitation of the
+  top-level summary field, not a correctness failure, and it is recorded here
+  rather than fixed so that changing the field's values stays a deliberate,
+  separately reviewed API change.
+- **`endpoint_sample` is illustrative, not exhaustive.** Each channel's
+  `endpoint_sample` is capped at 10 entries and ordered by identifier, never by
+  size, activity, or any notion of quality. It exists to make a channel
+  inspectable, and a caller must never read it as the full set of endpoints or
+  infer anything from its length. `distinct_endpoint_count` remains the
+  complete derived count for the evidence set and is unaffected by the cap.
+- Relevance is permanently capped at INFERRED, so unrelated high-volume
+  content linked only by a shared query is still not fully detectable.
+  `channels_found_only_via_shared_queries` reports that dilution rather than
+  correcting for it.
+- Treating a distinct `seller_id` or `channel_id` as one distinct reachable
+  endpoint is an unvalidated V1 assumption. One operator running several
+  storefronts counts as several endpoints.
+
 ### Known technical debt
 
 - **Unbounded in-memory research store and its indexes.** `ResearchStore` is
@@ -926,6 +968,19 @@ demonstrates the difference.
   process-local index. Deferred deliberately: the store and its indexes must
   be replaced or redesigned by the persistence milestone that implements
   `schema.sql`, not patched in the in-memory seam.
+- **`_id_sort_key` is duplicated across three modules.** The deterministic
+  identifier-ordering helper — `(str(value), type(value).__name__)`, the key
+  that gives mixed-type identifiers a total order without coercing either
+  value — now exists independently in `app/services/purchase_evidence.py`
+  (4A), `app/services/price_evidence.py` (4B), and
+  `app/services/buyer_reach.py` (4D). This is **maintainability debt only**:
+  all three compute the same key today — the bodies are character-identical
+  and only the docstrings differ — and every affected derivation is
+  deterministic, verified by each milestone's shuffle-invariance tests. The
+  risk is drift — a future change to one copy that does not reach the others
+  would make two milestones order identifiers differently from a third.
+  Deferred deliberately: consolidating it touches three shipped derivations at
+  once and belongs in a change reviewed for that, not in a documentation pass.
 
 ## Run locally
 
