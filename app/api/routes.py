@@ -47,6 +47,12 @@ from app.services.preliminary_ranking import (
 from app.services.public_content import run_public_content_research
 from app.services.public_content_features import ContentOutlier, PublicContentSummary
 from app.services.buyer_reach import BuyerReachProvenance, BuyerReachResult, ReachChannel
+from app.services.competition_opportunity import (
+    CompetitionFieldFeatures,
+    CompetitionFieldProvenance,
+    CompetitionOpportunityResult,
+    CompetitionReadings,
+)
 from app.services.price_evidence import (
     PriceBand,
     PriceEvidenceFeatures,
@@ -1373,6 +1379,165 @@ class BuyerReachOut(BaseModel):
         )
 
 
+class CompetitionReadingsOut(BaseModel):
+    """The two opposed readings of one field pattern, permanently paired.
+
+    Both are always present. Neither is preferred, and the pair is what
+    encodes competition's non-monotonicity: the same evidence argues in both
+    directions, and the evidence cannot settle which reading holds.
+    """
+
+    market_exists_reading: str
+    entry_difficulty_reading: str
+    unresolvable_because: str
+
+    @classmethod
+    def from_readings(cls, r: CompetitionReadings) -> "CompetitionReadingsOut":
+        return cls(
+            market_exists_reading=r.market_exists_reading,
+            entry_difficulty_reading=r.entry_difficulty_reading,
+            unresolvable_because=r.unresolvable_because,
+        )
+
+
+class CompetitionFieldFeaturesOut(BaseModel):
+    """Structural features of marketplace supply. No price, review, or rating."""
+
+    competing_listing_count: int
+    excluded_physical_listing_count: int
+    unknown_format_listing_count: int
+    listings_with_seller_attribution: int
+    listings_without_seller_attribution: int
+    seller_count_in_field: int
+    # How much of the field the concentration statistics below describe. Read
+    # every share below as a statement about this share of the listings.
+    seller_attribution_share: float | None
+    # Shares of LISTINGS. Not Milestone 4A's top_seller_proxy_share, which is
+    # a share of observed review volume over a different population.
+    # Null means no listing carried a seller: unknown, never zero.
+    top_seller_listing_share: float | None
+    max_listings_per_seller: int | None
+    single_listing_seller_count: int | None
+    sellers_covering_half_of_listings: int | None
+    features_version: str
+
+    @classmethod
+    def from_features(cls, f: CompetitionFieldFeatures) -> "CompetitionFieldFeaturesOut":
+        return cls(
+            competing_listing_count=f.competing_listing_count,
+            excluded_physical_listing_count=f.excluded_physical_listing_count,
+            unknown_format_listing_count=f.unknown_format_listing_count,
+            listings_with_seller_attribution=f.listings_with_seller_attribution,
+            listings_without_seller_attribution=f.listings_without_seller_attribution,
+            seller_count_in_field=f.seller_count_in_field,
+            seller_attribution_share=f.seller_attribution_share,
+            top_seller_listing_share=f.top_seller_listing_share,
+            max_listings_per_seller=f.max_listings_per_seller,
+            single_listing_seller_count=f.single_listing_seller_count,
+            sellers_covering_half_of_listings=f.sellers_covering_half_of_listings,
+            features_version=f.features_version,
+        )
+
+
+class CompetitionFieldProvenanceOut(BaseModel):
+    """Lineage, canonically ordered by Milestone 4E itself."""
+
+    candidate_id: UUID
+    evidence_ids: list[UUID]
+    listing_ids: list[str]
+    seller_ids: list[str]
+    providers: list[str]
+    marketplaces: list[str]
+    source_truth_classes: list[str]
+    duplicate_evidence_suppressed: int
+
+    @classmethod
+    def from_provenance(
+        cls, p: CompetitionFieldProvenance
+    ) -> "CompetitionFieldProvenanceOut":
+        return cls(
+            candidate_id=p.candidate_id,
+            evidence_ids=list(p.evidence_ids),
+            listing_ids=list(p.listing_ids),
+            seller_ids=list(p.seller_ids),
+            providers=list(p.providers),
+            marketplaces=list(p.marketplaces),
+            source_truth_classes=list(p.source_truth_classes),
+            duplicate_evidence_suppressed=p.duplicate_evidence_suppressed,
+        )
+
+
+class CompetitionOpportunityOut(BaseModel):
+    candidate_id: UUID
+    state: str
+    # Always null: competition is non-monotonic and no formula is approved.
+    value: float | None
+    # Field SHAPE only. The patterns are unordered: CROWDED_FIELD is not
+    # worse than SPARSE_FIELD, and CONCENTRATED_FIELD is not a warning.
+    pattern: str
+    readings: CompetitionReadingsOut
+    features: CompetitionFieldFeaturesOut | None
+    provenance: CompetitionFieldProvenanceOut
+
+    value_truth_class: str | None
+    features_truth_class: str | None
+    evidence_truth_basis: str | None
+
+    # Permanent UNKNOWN markers: conclusions supply structure cannot support.
+    saturation: str
+    entry_difficulty: str
+    win_probability: str
+    differentiation_opportunity: str
+    competitor_strength: str
+    competitor_revenue: str
+    market_share_available: str
+
+    missing_reason: str | None
+    limitations: list[str]
+    dimension_name: str
+    version: str
+    pattern_version: str
+
+    @classmethod
+    def from_result(
+        cls, r: CompetitionOpportunityResult
+    ) -> "CompetitionOpportunityOut":
+        return cls(
+            candidate_id=r.candidate_id,
+            state=r.state.value,
+            value=r.value,
+            pattern=r.pattern.value,
+            readings=CompetitionReadingsOut.from_readings(r.readings),
+            features=(
+                CompetitionFieldFeaturesOut.from_features(r.features)
+                if r.features is not None
+                else None
+            ),
+            provenance=CompetitionFieldProvenanceOut.from_provenance(r.provenance),
+            value_truth_class=(
+                r.value_truth_class.value if r.value_truth_class else None
+            ),
+            features_truth_class=(
+                r.features_truth_class.value if r.features_truth_class else None
+            ),
+            evidence_truth_basis=(
+                r.evidence_truth_basis.value if r.evidence_truth_basis else None
+            ),
+            saturation=r.saturation.value,
+            entry_difficulty=r.entry_difficulty.value,
+            win_probability=r.win_probability.value,
+            differentiation_opportunity=r.differentiation_opportunity.value,
+            competitor_strength=r.competitor_strength.value,
+            competitor_revenue=r.competitor_revenue.value,
+            market_share_available=r.market_share_available.value,
+            missing_reason=r.missing_reason,
+            limitations=list(r.limitations),
+            dimension_name=r.dimension_name,
+            version=r.version,
+            pattern_version=r.pattern_version,
+        )
+
+
 class DerivationOutcomeOut(BaseModel):
     derivation: str
     status: str
@@ -1403,6 +1568,8 @@ class PreliminaryResearchResponse(BaseModel):
     price_evidence: list[PriceEvidenceOut]
     # Milestone 4D: channel evidence for the selected candidates only.
     buyer_reach: list[BuyerReachOut]
+    # Milestone 4E: competitive-field shape for the selected candidates only.
+    competition_opportunity: list[CompetitionOpportunityOut]
     derivations: list[DerivationOutcomeOut]
     orchestration_version: str
     dimensions_version: str
@@ -1507,6 +1674,13 @@ async def research_preliminary(
             BuyerReachOut.from_result(result.buyer_reach[r.candidate_id])
             for r in ranked
             if r.candidate_id in result.buyer_reach
+        ],
+        competition_opportunity=[
+            CompetitionOpportunityOut.from_result(
+                result.competition_opportunity[r.candidate_id]
+            )
+            for r in ranked
+            if r.candidate_id in result.competition_opportunity
         ],
         derivations=[DerivationOutcomeOut.from_outcome(d) for d in result.derivations],
         orchestration_version=result.orchestration_version,
