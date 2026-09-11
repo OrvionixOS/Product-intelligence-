@@ -4,7 +4,7 @@ Evidence-backed digital-product opportunity engine.
 
 ## Current state
 
-Milestones 0 through 4G and Milestone 5A are implemented. The foundation
+Milestones 0 through 4G and Milestones 5A-5B are implemented. The foundation
 below remains the Milestone 0 contract; later sections document the completed
 research, derivation, product-specification, fit, and content-intelligence
 slices:
@@ -1368,6 +1368,103 @@ Milestone 5A (robust creator-relative outlier evidence) is implemented:
   scope isolation, UNKNOWN-versus-zero semantics, zero baselines, identity
   boundaries, duplicate suppression, canonical provenance, shuffle
   invariance, forbidden fields, and the no-network contract.
+
+Milestone 5B (content pattern extraction) is implemented:
+
+- A deterministic derivation (`app/services/content_patterns.py`,
+  `content_patterns_v1`) over public-content evidence **already collected**
+  by Milestone 3B. No provider call, no network, no persistence, no
+  endpoint, and no LLM
+- Service-layer only, matching 5A's boundary. Route count is unchanged at 15
+
+#### What recurs, and what that is not
+
+5B reports which surface features recur across the collected content: title
+tokens, adjacent title bigrams, tags, categories and duration bands. Each
+pattern carries a video count, a distinct-creator count, a concentration
+state, and lineage back to the contributing evidence records and video ids.
+
+A recurring pattern is an observation about content that exists. It is never
+a formula, a hook, or a technique that works. Videos that outperform their
+creator's median differ in countless ways this module cannot see — topic,
+timing, thumbnail, existing audience, platform distribution — and nothing
+here isolates a pattern from any of them.
+
+#### Prevalence and co-occurrence are two facts, never one
+
+| | |
+| --- | --- |
+| prevalence | how often a pattern occurs across the collected corpus |
+| co-occurrence | how often it occurs among the observations 5A scored above their own creator's baseline |
+
+They have separate denominators, separate states, and are **never combined**
+into a strength, quality, or performance figure — combining them is exactly
+how a co-occurrence becomes a claim that a pattern works. Both shares are
+emitted side by side and neither is multiplied by the other.
+
+#### One prolific creator is not a field
+
+Every pattern reports `distinct_channel_count` and `top_channel_share`
+alongside `video_count`, with a concentration state of `SINGLE_CREATOR`,
+`CREATOR_CONCENTRATED`, `MULTI_CREATOR` or `CREATOR_UNKNOWN`. Videos with no
+channel id are never merged into a synthetic creator. Outlier co-occurrence
+additionally requires `MIN_INDEPENDENT_CREATORS_FOR_COOCCURRENCE` (3)
+independent creators before any comparison is reported; below that it is
+`INSUFFICIENT_INDEPENDENT_CREATORS`.
+
+#### Missing metadata is missing, never absence
+
+A video whose title, tags, category or duration the provider did not return
+is UNAVAILABLE for that field: excluded from that field's denominator and
+counted, never treated as evidence a pattern is absent. Prevalence is always
+a share of the videos that *could* have carried the pattern. An absent `tags`
+key and an observed empty tag list are kept distinct.
+
+The evidence **record** is the authority: metadata is read from a payload
+only when the content-observation record carrying it is OBSERVED, exactly as
+5A refuses to read a view count from a payload snapshot. A test plants a
+title in a payload behind an UNKNOWN record and asserts it is never read.
+
+#### Deterministic normalization, no semantic clustering
+
+`content_normalization_v1` is NFKC, invisible-character stripping, casefold,
+punctuation-to-space and trim. Casing, punctuation and Unicode-equivalent
+spellings collapse to one pattern; a word repeated inside one title is one
+video's use of it. `duration_band_v1` fixes five non-overlapping bands that
+tile the non-negative line. No stemming, no lemmatization, and **no LLM** in
+this milestone.
+
+#### What 5B never emits
+
+No numeric score of any kind — no 0-100 pattern score, no virality score, no
+expected-performance score, no RED/YELLOW/GREEN, and no POS or ECS change.
+`value` is permanently `None`, the dimension is
+`preliminary_content_patterns`, and every emitted ratio is a share in [0, 1].
+Patterns are ordered canonically by (kind, value), never by count, because
+ordering by count is an implicit ranking.
+
+Channel aggregates and engagement magnitudes are unreadable, enforced by an
+AST guard that also pins the exact payload keys the reducer reads.
+
+#### V1 assumptions
+
+`MIN_PATTERN_VIDEO_COUNT` (2), `MIN_TOKEN_LENGTH` (2), `CONCENTRATION_SHARE`
+(0.6), `MIN_INDEPENDENT_CREATORS_FOR_COOCCURRENCE` (3),
+`RELATIVE_SCORE_ABOVE_BASELINE` (0.0, a median split defining which
+observations are compared — not a performance bar), `SHARE_DIVERGENCE_RATIO`
+(1.5), the stopword list, and the duration-band boundaries are all
+unvalidated V1 definitions chosen by inspection and calibrated against no
+outcome data.
+
+#### Known limitations
+
+- The sampled videos are provider-ordered observations, not the whole field.
+- Tokens and bigrams are literal after normalization; synonyms and
+  paraphrases are separate patterns.
+- Co-occurrence describes the sample and isolates no variable, so it can
+  never support a causal or predictive reading.
+- The corpus is whatever the Milestone 1 content queries returned, so
+  relevance rests on those hypotheses exactly as it does for 4D and 4F.
 
 ### Known technical debt
 
