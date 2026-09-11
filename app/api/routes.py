@@ -46,6 +46,12 @@ from app.services.preliminary_ranking import (
 )
 from app.services.public_content import run_public_content_research
 from app.services.public_content_features import ContentOutlier, PublicContentSummary
+from app.services.audience_attention import (
+    AttentionClaim,
+    AttentionFeatures,
+    AttentionProvenance,
+    AudienceAttentionResult,
+)
 from app.services.buyer_reach import BuyerReachProvenance, BuyerReachResult, ReachChannel
 from app.services.competition_opportunity import (
     CompetitionFieldFeatures,
@@ -1538,6 +1544,182 @@ class CompetitionOpportunityOut(BaseModel):
         )
 
 
+class AttentionClaimOut(BaseModel):
+    """What a pattern observes, and the boundary of what it supports.
+
+    Both halves are always present: a consumer cannot receive a pattern
+    without also receiving what that pattern does not establish.
+    """
+
+    observes: str
+    does_not_establish: str
+
+    @classmethod
+    def from_claim(cls, c: AttentionClaim) -> "AttentionClaimOut":
+        return cls(observes=c.observes, does_not_establish=c.does_not_establish)
+
+
+class AttentionFeaturesOut(BaseModel):
+    """How observed attention was distributed. No total, by design.
+
+    Nulls are UNKNOWN, never zero: a share of no observed attention has no
+    denominator, and a video with no observed view count is not a video with
+    zero views.
+    """
+
+    video_count: int
+    videos_with_observed_views: int
+    videos_with_unmeasured_views: int
+    channels_in_sample: int
+    # Not Milestone 4D's channel count: this one requires an OBSERVED view.
+    channels_with_observed_attention: int
+
+    median_views: float | None
+    lower_quartile_views: float | None
+    upper_quartile_views: float | None
+
+    # The outlier is isolated rather than averaged away.
+    top_video_attention_share: float | None
+    median_views_excluding_top_video: float | None
+    videos_covering_half_of_attention: int | None
+    top_channel_attention_share: float | None
+
+    # Consistency relative to THIS field's median. A uniformly ignored field
+    # is perfectly consistent at a trivial level, so read these next to
+    # median_views: they describe spread, never level.
+    videos_within_band_of_median: int | None
+    proportion_within_band_of_median: float | None
+
+    videos_with_publish_date: int
+    publish_span_days: int | None
+    distinct_publish_months: int | None
+
+    # Interaction with a video. Never willingness to pay.
+    median_engagement_rate: float | None
+    videos_with_engagement_rate: int
+    features_version: str
+
+    @classmethod
+    def from_features(cls, f: AttentionFeatures) -> "AttentionFeaturesOut":
+        return cls(
+            video_count=f.video_count,
+            videos_with_observed_views=f.videos_with_observed_views,
+            videos_with_unmeasured_views=f.videos_with_unmeasured_views,
+            channels_in_sample=f.channels_in_sample,
+            channels_with_observed_attention=f.channels_with_observed_attention,
+            median_views=f.median_views,
+            lower_quartile_views=f.lower_quartile_views,
+            upper_quartile_views=f.upper_quartile_views,
+            top_video_attention_share=f.top_video_attention_share,
+            median_views_excluding_top_video=f.median_views_excluding_top_video,
+            videos_covering_half_of_attention=f.videos_covering_half_of_attention,
+            top_channel_attention_share=f.top_channel_attention_share,
+            videos_within_band_of_median=f.videos_within_band_of_median,
+            proportion_within_band_of_median=f.proportion_within_band_of_median,
+            videos_with_publish_date=f.videos_with_publish_date,
+            publish_span_days=f.publish_span_days,
+            distinct_publish_months=f.distinct_publish_months,
+            median_engagement_rate=f.median_engagement_rate,
+            videos_with_engagement_rate=f.videos_with_engagement_rate,
+            features_version=f.features_version,
+        )
+
+
+class AttentionProvenanceOut(BaseModel):
+    """Lineage, canonically ordered by Milestone 4F itself."""
+
+    candidate_id: UUID
+    evidence_ids: list[UUID]
+    video_ids: list[str]
+    channel_ids: list[str]
+    providers: list[str]
+    platforms: list[str]
+    source_truth_classes: list[str]
+    duplicate_evidence_suppressed: int
+
+    @classmethod
+    def from_provenance(cls, p: AttentionProvenance) -> "AttentionProvenanceOut":
+        return cls(
+            candidate_id=p.candidate_id,
+            evidence_ids=list(p.evidence_ids),
+            video_ids=list(p.video_ids),
+            channel_ids=list(p.channel_ids),
+            providers=list(p.providers),
+            platforms=list(p.platforms),
+            source_truth_classes=list(p.source_truth_classes),
+            duplicate_evidence_suppressed=p.duplicate_evidence_suppressed,
+        )
+
+
+class AudienceAttentionOut(BaseModel):
+    candidate_id: UUID
+    state: str
+    # Always null: a single number over views is monotone in views, which is
+    # the reading this milestone exists to avoid.
+    value: float | None
+    # Distribution SHAPE only. No pattern is a level of demand.
+    pattern: str
+    claim: AttentionClaimOut
+    features: AttentionFeaturesOut | None
+    provenance: AttentionProvenanceOut
+
+    value_truth_class: str | None
+    features_truth_class: str | None
+    evidence_truth_basis: str | None
+
+    # Permanent UNKNOWN markers: conclusions attention cannot support.
+    buyer_count: str
+    purchase_intent: str
+    candidate_audience_size: str
+    demand_durability: str
+    willingness_to_pay: str
+    watch_time: str
+    conversion_probability: str
+
+    missing_reason: str | None
+    limitations: list[str]
+    dimension_name: str
+    version: str
+    pattern_version: str
+
+    @classmethod
+    def from_result(cls, r: AudienceAttentionResult) -> "AudienceAttentionOut":
+        return cls(
+            candidate_id=r.candidate_id,
+            state=r.state.value,
+            value=r.value,
+            pattern=r.pattern.value,
+            claim=AttentionClaimOut.from_claim(r.claim),
+            features=(
+                AttentionFeaturesOut.from_features(r.features)
+                if r.features is not None
+                else None
+            ),
+            provenance=AttentionProvenanceOut.from_provenance(r.provenance),
+            value_truth_class=(
+                r.value_truth_class.value if r.value_truth_class else None
+            ),
+            features_truth_class=(
+                r.features_truth_class.value if r.features_truth_class else None
+            ),
+            evidence_truth_basis=(
+                r.evidence_truth_basis.value if r.evidence_truth_basis else None
+            ),
+            buyer_count=r.buyer_count.value,
+            purchase_intent=r.purchase_intent.value,
+            candidate_audience_size=r.candidate_audience_size.value,
+            demand_durability=r.demand_durability.value,
+            willingness_to_pay=r.willingness_to_pay.value,
+            watch_time=r.watch_time.value,
+            conversion_probability=r.conversion_probability.value,
+            missing_reason=r.missing_reason,
+            limitations=list(r.limitations),
+            dimension_name=r.dimension_name,
+            version=r.version,
+            pattern_version=r.pattern_version,
+        )
+
+
 class DerivationOutcomeOut(BaseModel):
     derivation: str
     status: str
@@ -1570,6 +1752,8 @@ class PreliminaryResearchResponse(BaseModel):
     buyer_reach: list[BuyerReachOut]
     # Milestone 4E: competitive-field shape for the selected candidates only.
     competition_opportunity: list[CompetitionOpportunityOut]
+    # Milestone 4F: attention distribution for the selected candidates only.
+    audience_attention: list[AudienceAttentionOut]
     derivations: list[DerivationOutcomeOut]
     orchestration_version: str
     dimensions_version: str
@@ -1681,6 +1865,11 @@ async def research_preliminary(
             )
             for r in ranked
             if r.candidate_id in result.competition_opportunity
+        ],
+        audience_attention=[
+            AudienceAttentionOut.from_result(result.audience_attention[r.candidate_id])
+            for r in ranked
+            if r.candidate_id in result.audience_attention
         ],
         derivations=[DerivationOutcomeOut.from_outcome(d) for d in result.derivations],
         orchestration_version=result.orchestration_version,
