@@ -338,6 +338,12 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   prolific creator cannot make a pattern read as field-wide support.
   Co-occurrence additionally requires three independent creators before any
   comparison is reported
+- `top_channel_share` is measured against EVERY occurrence of the pattern,
+  never the attributed subset, so unknown or conflicting creator identity can
+  only lower it. Absent and conflicting channel ids both count against a
+  dominance claim and are reported as separate counts; below the threshold
+  with identity incomplete the state is CREATOR_PARTIALLY_UNKNOWN, since
+  SINGLE_CREATOR and MULTI_CREATOR would claim a spread that is not known
 - Missing title/tags/category/duration stays UNAVAILABLE for that field,
   shrinks that field's denominator, and is never counted as absence or zero
 - Deterministic NFKC + casefold normalization preserving Unicode letters,
@@ -359,6 +365,9 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - Channel aggregates (`channel_subscriber_count`, `channel_view_count`,
   `channel_video_count`) and engagement magnitudes are unreadable, enforced
   by an AST guard that also pins the exact payload keys read
+- 25 mutations of the milestone's guards were applied and all 25 were killed,
+  including reverting the concentration denominator, folding CONFLICTING
+  channel identity into ordinary absence, and declaring the dimension SCORED
 
 ### Remaining Milestone 5 scope
 - 30 production-ready experiments

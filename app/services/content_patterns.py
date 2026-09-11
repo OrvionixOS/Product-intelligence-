@@ -47,9 +47,19 @@ A single creator who publishes forty videos with the same title formula
 would otherwise make that formula look like a property of the whole field.
 Every pattern therefore carries `distinct_channel_count` alongside
 `video_count`, plus `top_channel_share` and a concentration state, so a
-pattern supported by one creator can never read as broad support. The same
-control applies to outlier co-occurrence, which additionally requires a
-minimum number of INDEPENDENT creators before any comparison is reported.
+pattern supported by one creator can never read as broad support.
+
+`top_channel_share` is the largest known creator's share of ALL the
+pattern's occurrences, not of the attributed ones. Dividing by the attributed
+subset would let unknown creator identity STRENGTHEN the evidence that a
+known creator dominates — one known creator among ten occurrences would
+report 1.0 — which inverts the safeguard. Occurrences with no creator, and
+occurrences whose records name different creators, are reported separately
+and both count against a dominance claim.
+
+The same control applies to outlier co-occurrence, which additionally
+requires a minimum number of INDEPENDENT creators before any comparison is
+reported.
 
 Missing metadata is missing, never absence
 -------------------------------------------
@@ -236,6 +246,12 @@ class ConcentrationState(str, Enum):
     CREATOR_CONCENTRATED = "CREATOR_CONCENTRATED"
     # No single creator dominates.
     MULTI_CREATOR = "MULTI_CREATOR"
+    # Some occurrences carry no usable creator identity, and the known
+    # creators do not reach the concentration threshold across ALL
+    # occurrences. Neither concentration nor breadth is establishable: the
+    # unattributed occurrences could all belong to the largest known creator,
+    # or to none of them.
+    CREATOR_PARTIALLY_UNKNOWN = "CREATOR_PARTIALLY_UNKNOWN"
     # No occurrence carried a creator identity.
     CREATOR_UNKNOWN = "CREATOR_UNKNOWN"
 
@@ -380,10 +396,17 @@ def duration_band(seconds: int) -> DurationBand:
 
 @dataclass(slots=True, frozen=True)
 class PatternOccurrence:
-    """One video contributing one occurrence of one pattern."""
+    """One video contributing one occurrence of one pattern.
+
+    `channel_state` keeps "no record named a creator" apart from "two
+    OBSERVED records named different creators". Both leave `channel_id` None,
+    but they are different facts and a conflict must not be presented as an
+    ordinary absence.
+    """
 
     video_id: str
     channel_id: str | None
+    channel_state: FieldState
     evidence_ids: tuple[UUID, ...]
 
 
@@ -424,7 +447,15 @@ class ContentPattern:
     prevalence_share: float
     # Creator spread, always alongside the raw count.
     distinct_channel_count: int
+    # Occurrences no record attributed to a creator.
     videos_without_channel_id: int
+    # Occurrences whose OBSERVED records named different creators. Kept apart
+    # from plain absence so a data-quality problem is never reported as one.
+    videos_with_conflicting_channel_id: int
+    # Share of ALL this pattern's occurrences held by its largest KNOWN
+    # creator. The denominator is every occurrence, not only the attributed
+    # ones: an unknown creator identity must never be able to inflate the
+    # evidence that a known creator dominates.
     top_channel_share: float | None
     concentration: ConcentrationState
     # Lineage back to the contributing records and videos.
@@ -747,13 +778,42 @@ _KIND_FIELD: dict[PatternKind, str] = {
 
 
 def _concentration(
-    channel_counts: dict[str, int], occurrence_count: int, without_channel: int
+    channel_counts: dict[str, int], occurrence_count: int, unattributed: int
 ) -> tuple[float | None, ConcentrationState]:
-    if not channel_counts:
+    """Largest known creator's share of ALL this pattern's occurrences.
+
+    The denominator is `occurrence_count`, never the attributed subset. An
+    earlier version divided by the attributed occurrences alone, so one known
+    creator among ten occurrences — the other nine unattributed — reported a
+    share of 1.0 and a state of CREATOR_CONCENTRATED. Unknown creator
+    identity was strengthening the evidence that a known creator dominated,
+    which inverts the safeguard this figure exists to provide.
+
+    The state is conservative in BOTH directions when identity is incomplete:
+
+    - A share at or above the threshold is established whatever the
+      unattributed occurrences turn out to be, since resolving them can only
+      raise that creator's count or add another; it is a lower bound, so
+      CREATOR_CONCENTRATED is safe to report.
+    - Below the threshold, breadth is NOT established either: every
+      unattributed occurrence could belong to the largest known creator. The
+      pattern is therefore CREATOR_PARTIALLY_UNKNOWN rather than
+      MULTI_CREATOR, which would overstate how many creators carry it.
+
+    SINGLE_CREATOR and MULTI_CREATOR are reserved for fully attributed
+    patterns, where the spread is actually known.
+    """
+    if not channel_counts or occurrence_count <= 0:
         return None, ConcentrationState.CREATOR_UNKNOWN
-    attributed = sum(channel_counts.values())
-    top_share = round(max(channel_counts.values()) / attributed, 4)
-    if len(channel_counts) == 1 and without_channel == 0:
+
+    top_share = round(max(channel_counts.values()) / occurrence_count, 4)
+
+    if unattributed > 0:
+        if top_share >= CONCENTRATION_SHARE:
+            return top_share, ConcentrationState.CREATOR_CONCENTRATED
+        return top_share, ConcentrationState.CREATOR_PARTIALLY_UNKNOWN
+
+    if len(channel_counts) == 1:
         return top_share, ConcentrationState.SINGLE_CREATOR
     if top_share >= CONCENTRATION_SHARE:
         return top_share, ConcentrationState.CREATOR_CONCENTRATED
@@ -1062,6 +1122,7 @@ def derive_content_patterns(
             PatternOccurrence(
                 video_id=r.video_id,
                 channel_id=r.channel_id,
+                channel_state=r.states["channel_id"],
                 evidence_ids=r.evidence_ids,
             )
             for r in ordered
@@ -1070,9 +1131,16 @@ def derive_content_patterns(
         for r in ordered:
             if r.channel_id is not None:
                 channel_counts[r.channel_id] = channel_counts.get(r.channel_id, 0) + 1
-        without_channel = sum(1 for r in ordered if r.channel_id is None)
+        without_channel = sum(
+            1 for r in ordered if r.states["channel_id"] is FieldState.UNAVAILABLE
+        )
+        conflicting_channel = sum(
+            1 for r in ordered if r.states["channel_id"] is FieldState.CONFLICTING
+        )
+        # Both kinds leave the occurrence unattributed, and both must count
+        # against a dominance claim; only their REPORTING is kept separate.
         top_share, concentration = _concentration(
-            channel_counts, len(ordered), without_channel
+            channel_counts, len(ordered), without_channel + conflicting_channel
         )
         available = by_field_available[kind]
         prevalence = round(len(ordered) / available, 4) if available else 0.0
@@ -1086,6 +1154,7 @@ def derive_content_patterns(
                 prevalence_share=prevalence,
                 distinct_channel_count=len(channel_counts),
                 videos_without_channel_id=without_channel,
+                videos_with_conflicting_channel_id=conflicting_channel,
                 top_channel_share=top_share,
                 concentration=concentration,
                 occurrences=occurrences,

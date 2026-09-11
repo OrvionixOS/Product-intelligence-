@@ -1406,11 +1406,30 @@ emitted side by side and neither is multiplied by the other.
 
 Every pattern reports `distinct_channel_count` and `top_channel_share`
 alongside `video_count`, with a concentration state of `SINGLE_CREATOR`,
-`CREATOR_CONCENTRATED`, `MULTI_CREATOR` or `CREATOR_UNKNOWN`. Videos with no
-channel id are never merged into a synthetic creator. Outlier co-occurrence
-additionally requires `MIN_INDEPENDENT_CREATORS_FOR_COOCCURRENCE` (3)
-independent creators before any comparison is reported; below that it is
+`CREATOR_CONCENTRATED`, `MULTI_CREATOR`, `CREATOR_PARTIALLY_UNKNOWN` or
+`CREATOR_UNKNOWN`. Videos with no channel id are never merged into a
+synthetic creator. Outlier co-occurrence additionally requires
+`MIN_INDEPENDENT_CREATORS_FOR_COOCCURRENCE` (3) independent creators before
+any comparison is reported; below that it is
 `INSUFFICIENT_INDEPENDENT_CREATORS`.
+
+**Unknown creator identity can only lower `top_channel_share`, never raise
+it.** The denominator is every occurrence of the pattern, not the attributed
+subset: one known creator among ten occurrences reports 0.1, not 1.0. An
+occurrence is unattributed whether its channel id was never returned or two
+OBSERVED records disagreed about it, and both count against a dominance
+claim — a `CONFLICTING` channel id is not silently presented as an ordinary
+absence, since `videos_without_channel_id` and
+`videos_with_conflicting_channel_id` are reported separately.
+
+The state is conservative in both directions while identity is incomplete. A
+share at or above the threshold is a lower bound — resolving the unknowns can
+only raise that creator's count — so `CREATOR_CONCENTRATED` is safe to
+report. Below the threshold, breadth is not established either, because every
+unattributed occurrence could belong to the largest known creator; the
+pattern is `CREATOR_PARTIALLY_UNKNOWN` rather than `MULTI_CREATOR`.
+`SINGLE_CREATOR` and `MULTI_CREATOR` are reserved for fully attributed
+patterns, where the spread is actually known.
 
 #### Missing metadata is missing, never absence
 

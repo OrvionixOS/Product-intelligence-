@@ -41,6 +41,7 @@ from app.services.content_patterns import (
     MIN_INDEPENDENT_CREATORS_FOR_COOCCURRENCE,
     MIN_PATTERN_VIDEO_COUNT,
     STATE_BOUNDARIES,
+    CONCENTRATION_SHARE,
     ConcentrationState,
     ContentPatternsState,
     CooccurrenceState,
@@ -555,6 +556,48 @@ def test_only_observed_content_records_contribute(truth_class):
     assert pattern_for(result, PatternKind.TITLE_TOKEN, "meal").video_count == 2
 
 
+@pytest.mark.parametrize(
+    "purpose",
+    [
+        EvidencePurpose.AUDIENCE,
+        EvidencePurpose.COMPETITION,
+        EvidencePurpose.PURCHASE,
+        EvidencePurpose.QUALITATIVE,
+    ],
+)
+def test_a_content_signal_stored_under_another_purpose_is_not_read(purpose):
+    """Signal type alone does not admit a record; the stored purpose must agree.
+
+    Every fixture in this file pairs `public_content_observation` with
+    `CONTENT`, so the purpose filter had nothing constraining it: a mutation
+    deleting the check survived the whole suite. A record can legitimately
+    carry a content signal type under a different purpose — 5A's own
+    per-video records are AUDIENCE — and reading one here would take an
+    observation collected for one question as evidence for another.
+    """
+    candidate_id = uuid4()
+    observed = video_evidence(
+        "OK1", candidate_id=candidate_id, channel_id="UC_A", title="meal plan"
+    ) + video_evidence(
+        "OK2", candidate_id=candidate_id, channel_id="UC_B", title="meal plan"
+    )
+    off_purpose = [
+        item.model_copy(update={"purpose": purpose})
+        for item in video_evidence(
+            "OFF", candidate_id=candidate_id, channel_id="UC_C", title="meal plan"
+        )
+        if item.signal_type == "public_content_observation"
+    ]
+    assert off_purpose[0].truth_class is TruthClass.OBSERVED
+    assert off_purpose[0].raw_payload["title"] == "meal plan"
+
+    result = run(observed + off_purpose, candidate_id)
+    assert result.observed_video_count == 2
+    pattern = pattern_for(result, PatternKind.TITLE_TOKEN, "meal")
+    assert pattern.video_count == 2
+    assert [o.video_id for o in pattern.occurrences] == ["OK1", "OK2"]
+
+
 def test_evidence_for_another_candidate_is_out_of_scope():
     mine = uuid4()
     theirs = uuid4()
@@ -740,11 +783,17 @@ def _identity(result) -> tuple:
         result.observed_video_count,
         result.distinct_channel_count,
         result.videos_without_channel_id,
+        result.videos_with_conflicting_channel_id,
         result.outlier_observation_count,
         result.outlier_distinct_channel_count,
         result.outlier_evidence_available,
         tuple(
-            (e.field, e.available_video_count, e.unavailable_video_count)
+            (
+                e.field,
+                e.available_video_count,
+                e.unavailable_video_count,
+                e.conflicting_video_count,
+            )
             for e in result.field_availability
         ),
         tuple(
@@ -756,9 +805,13 @@ def _identity(result) -> tuple:
                 p.prevalence_share,
                 p.distinct_channel_count,
                 p.videos_without_channel_id,
+                p.videos_with_conflicting_channel_id,
                 p.top_channel_share,
                 p.concentration,
-                tuple((o.video_id, o.channel_id, o.evidence_ids) for o in p.occurrences),
+                tuple(
+                    (o.video_id, o.channel_id, o.channel_state, o.evidence_ids)
+                    for o in p.occurrences
+                ),
                 p.evidence_ids,
                 (
                     p.cooccurrence.state,
@@ -1235,6 +1288,62 @@ def test_no_numeric_score_of_any_kind_is_emitted():
     )
 
 
+def test_no_path_ever_claims_the_dimension_is_scored():
+    """5B holds evidence, it never scores it — on EVERY path.
+
+    The empty paths each assert their dimension state, but the populated
+    path asserted nothing, so a mutation flipping it to SCORED survived the
+    whole suite. That is the one claim this milestone is not allowed to
+    make: no scoring formula for content patterns is approved, and a SCORED
+    dimension would tell a downstream consumer one exists.
+    """
+    candidate_id = uuid4()
+    evidence = _build_outlier_scenario(candidate_id, creators=4, hook_in_winner=True)
+    outlier = derive_robust_content_intelligence(
+        candidate_id=candidate_id, evidence=evidence
+    )
+
+    populated = run(evidence, candidate_id, outlier_evidence=outlier)
+    assert populated.patterns
+    assert populated.state is DimensionState.EVIDENCE_PRESENT_UNSCORED
+    assert populated.value is None
+
+    # Every other reachable path, for the same reason.
+    single, single_ev = corpus(("ONLY", "UC_A", "meal plan"))
+    bare_id = uuid4()
+    bare: list[EvidenceItem] = []
+    for index in range(2):
+        bare.extend(
+            video_evidence(
+                f"B{index}",
+                candidate_id=bare_id,
+                title=None,
+                tags=_UNSET,
+                category=None,
+                duration_seconds=_UNSET,
+            )
+        )
+    paths = [
+        run([], candidate_id),                                # NO_CONTENT_OBSERVED
+        run(single_ev, single),                               # NO_RECURRING_PATTERNS
+        run(bare, bare_id),                                   # METADATA_UNAVAILABLE
+        run([], candidate_id, missing_reasons={PUBLIC_CONTENT: FAILED}),
+    ]
+    assert [r.pattern_state for r in paths] == [
+        ContentPatternsState.NO_CONTENT_OBSERVED,
+        ContentPatternsState.NO_RECURRING_PATTERNS,
+        ContentPatternsState.METADATA_UNAVAILABLE,
+        ContentPatternsState.CONTENT_EVIDENCE_UNAVAILABLE,
+    ]
+    for result in paths:
+        assert result.state is not DimensionState.SCORED
+        assert result.value is None
+    assert {r.state for r in paths} == {
+        DimensionState.UNKNOWN,
+        DimensionState.MISSING,
+    }
+
+
 def test_every_state_states_what_it_does_not_establish():
     for state in ContentPatternsState:
         assert state in STATE_BOUNDARIES, state
@@ -1445,3 +1554,217 @@ def test_combining_marks_are_preserved_for_scripts_nfkc_does_not_compose():
         assert marks, text
         assert marks <= set(normalized), text
     assert tokenize_title(devanagari) == ("योजना", "बनाना")
+
+
+# ------------------------------- creator-concentration denominator
+
+
+def _concentration_corpus(
+    candidate_id: UUID,
+    known: dict[str, int],
+    unknown: int = 0,
+    conflicting: int = 0,
+) -> list[EvidenceItem]:
+    """A corpus where one pattern has a controlled creator composition."""
+    evidence: list[EvidenceItem] = []
+    for channel, count in known.items():
+        for index in range(count):
+            evidence.extend(
+                video_evidence(
+                    f"{channel}_{index}", candidate_id=candidate_id,
+                    channel_id=channel, title="meal plan",
+                )
+            )
+    for index in range(unknown):
+        evidence.extend(
+            video_evidence(
+                f"U{index}", candidate_id=candidate_id,
+                channel_id=None, title="meal plan",
+            )
+        )
+    for index in range(conflicting):
+        # Two OBSERVED records naming different creators for the same video.
+        evidence.extend(
+            video_evidence(
+                f"C{index}", candidate_id=candidate_id, channel_id="UC_X",
+                title="meal plan", payload_hash=f"c{index}a",
+            )
+        )
+        evidence.extend(
+            video_evidence(
+                f"C{index}", candidate_id=candidate_id, channel_id="UC_Y",
+                title="meal plan", payload_hash=f"c{index}b",
+            )
+        )
+    return evidence
+
+
+def _meal_pattern(candidate_id: UUID, evidence: list[EvidenceItem]):
+    result = run(evidence, candidate_id)
+    return pattern_for(result, PatternKind.TITLE_TOKEN, "meal")
+
+
+def test_one_known_creator_among_nine_unknown_is_not_concentrated():
+    """The finding: unknown identity must not inflate a dominance claim.
+
+    An earlier version divided by the ATTRIBUTED occurrences alone, so one
+    known creator among ten occurrences reported top_channel_share = 1.0 and
+    CREATOR_CONCENTRATED. The documented contract is a share of the pattern's
+    occurrences, and that is 1/10.
+    """
+    candidate_id = uuid4()
+    pattern = _meal_pattern(
+        candidate_id, _concentration_corpus(candidate_id, {"UC_A": 1}, unknown=9)
+    )
+    assert pattern.video_count == 10
+    assert pattern.top_channel_share == 0.1
+    assert pattern.top_channel_share < CONCENTRATION_SHARE
+    assert pattern.concentration is ConcentrationState.CREATOR_PARTIALLY_UNKNOWN
+    assert pattern.videos_without_channel_id == 9
+    assert pattern.videos_with_conflicting_channel_id == 0
+
+
+def test_six_from_one_creator_plus_four_unknown_is_concentrated_on_the_real_share():
+    """At or above the threshold over ALL occurrences, dominance is a fact.
+
+    Resolving the four unknowns can only raise that creator's count or add
+    another creator, so the share is a lower bound and the state is safe.
+    """
+    candidate_id = uuid4()
+    pattern = _meal_pattern(
+        candidate_id, _concentration_corpus(candidate_id, {"UC_A": 6}, unknown=4)
+    )
+    assert pattern.video_count == 10
+    assert pattern.top_channel_share == 0.6
+    assert pattern.concentration is ConcentrationState.CREATOR_CONCENTRATED
+
+
+def test_two_known_creators_with_a_large_unknown_remainder_claims_neither():
+    """Breadth is not established either: the unknowns could be one creator."""
+    candidate_id = uuid4()
+    pattern = _meal_pattern(
+        candidate_id,
+        _concentration_corpus(candidate_id, {"UC_A": 1, "UC_B": 1}, unknown=8),
+    )
+    assert pattern.video_count == 10
+    assert pattern.distinct_channel_count == 2
+    assert pattern.top_channel_share == 0.1
+    # Not MULTI_CREATOR: that would overstate how many creators carry it.
+    assert pattern.concentration is ConcentrationState.CREATOR_PARTIALLY_UNKNOWN
+    assert pattern.concentration is not ConcentrationState.MULTI_CREATOR
+
+
+def test_conflicting_channel_ids_count_against_dominance_and_are_reported_apart():
+    """A conflict is unattributed for the share, and never plain absence."""
+    candidate_id = uuid4()
+    pattern = _meal_pattern(
+        candidate_id,
+        _concentration_corpus(candidate_id, {"UC_A": 1}, conflicting=3),
+    )
+    assert pattern.video_count == 4
+    # 1 of 4, not 1 of 1.
+    assert pattern.top_channel_share == 0.25
+    assert pattern.concentration is ConcentrationState.CREATOR_PARTIALLY_UNKNOWN
+    # Conflict is reported in its own count, never folded into absence.
+    assert pattern.videos_with_conflicting_channel_id == 3
+    assert pattern.videos_without_channel_id == 0
+    states = {o.channel_state for o in pattern.occurrences}
+    assert FieldState.CONFLICTING in states
+    assert FieldState.UNAVAILABLE not in states
+
+
+def test_mixed_available_conflicting_and_absent_channel_ids():
+    candidate_id = uuid4()
+    pattern = _meal_pattern(
+        candidate_id,
+        _concentration_corpus(
+            candidate_id, {"UC_A": 2}, unknown=2, conflicting=2
+        ),
+    )
+    assert pattern.video_count == 6
+    assert pattern.top_channel_share == round(2 / 6, 4)
+    assert pattern.videos_without_channel_id == 2
+    assert pattern.videos_with_conflicting_channel_id == 2
+    assert pattern.concentration is ConcentrationState.CREATOR_PARTIALLY_UNKNOWN
+    # Every occurrence is accounted for exactly once.
+    attributed = sum(
+        1 for o in pattern.occurrences if o.channel_state is FieldState.AVAILABLE
+    )
+    assert (
+        attributed
+        + pattern.videos_without_channel_id
+        + pattern.videos_with_conflicting_channel_id
+        == pattern.video_count
+    )
+
+
+def test_all_channel_ids_unknown_yields_no_share_at_all():
+    candidate_id = uuid4()
+    pattern = _meal_pattern(
+        candidate_id, _concentration_corpus(candidate_id, {}, unknown=6)
+    )
+    assert pattern.video_count == 6
+    assert pattern.distinct_channel_count == 0
+    # Unknown, never zero and never 1.0.
+    assert pattern.top_channel_share is None
+    assert pattern.concentration is ConcentrationState.CREATOR_UNKNOWN
+
+
+def test_all_channel_ids_known_reports_the_true_spread():
+    candidate_id = uuid4()
+    single = _meal_pattern(
+        candidate_id, _concentration_corpus(candidate_id, {"UC_A": 10})
+    )
+    assert single.top_channel_share == 1.0
+    assert single.concentration is ConcentrationState.SINGLE_CREATOR
+
+    other = uuid4()
+    spread = _meal_pattern(
+        other, _concentration_corpus(other, {"UC_A": 3, "UC_B": 3, "UC_C": 4})
+    )
+    assert spread.video_count == 10
+    assert spread.top_channel_share == 0.4
+    assert spread.concentration is ConcentrationState.MULTI_CREATOR
+
+
+def test_unattributed_occurrences_can_only_lower_the_top_share():
+    """The invariant, swept: adding unknowns never raises the share.
+
+    This is the property the finding violated. Whatever the composition,
+    appending an occurrence with no usable creator must weaken — never
+    strengthen — the claim that one creator dominates.
+    """
+    rng = random.Random(5150)
+    for _ in range(60):
+        known = {f"UC_{i}": rng.randint(1, 4) for i in range(rng.randint(1, 3))}
+        # A single occurrence is not a recurring pattern, so the base corpus
+        # must clear MIN_PATTERN_VIDEO_COUNT before dilution means anything.
+        if sum(known.values()) < MIN_PATTERN_VIDEO_COUNT:
+            known["UC_0"] = known.get("UC_0", 0) + MIN_PATTERN_VIDEO_COUNT
+        candidate_id = uuid4()
+        base = _meal_pattern(
+            candidate_id, _concentration_corpus(candidate_id, known)
+        )
+        for extra in (1, 3, 7):
+            diluted_id = uuid4()
+            diluted = _meal_pattern(
+                diluted_id,
+                _concentration_corpus(diluted_id, known, unknown=extra),
+            )
+            assert diluted.top_channel_share <= base.top_channel_share, (
+                known, extra, diluted.top_channel_share, base.top_channel_share,
+            )
+            assert diluted.video_count == base.video_count + extra
+
+
+def test_concentration_states_are_order_independent():
+    candidate_id = uuid4()
+    evidence = _concentration_corpus(
+        candidate_id, {"UC_A": 2, "UC_B": 1}, unknown=2, conflicting=2
+    )
+    baseline = _identity(run(evidence, candidate_id))
+    rng = random.Random(31)
+    for _ in range(300):
+        shuffled = list(evidence)
+        rng.shuffle(shuffled)
+        assert _identity(run(shuffled, candidate_id)) == baseline
