@@ -164,6 +164,15 @@ LIMITATIONS = (
     "combined into a strength or quality measure.",
     "Normalization and duration bands are deterministic V1 definitions, not "
     "validated linguistic or editorial models.",
+    "Normalization preserves observed text: accents and non-Latin scripts "
+    "survive. Scripts without word separators yield one token per run, "
+    "because no segmentation is performed.",
+    "Where two OBSERVED records disagree about the same video's metadata, "
+    "that field is reported CONFLICTING and excluded, never resolved by "
+    "picking whichever record arrived first.",
+    "Milestone 5A evidence is consumed only when its candidate and research "
+    "run match this derivation's scope; a mismatch is reported and no "
+    "observation is read.",
     "No view, engagement, subscriber or channel aggregate is read here, and "
     "no demand, conversion, market-size, sales or revenue claim is produced.",
 )
@@ -204,6 +213,20 @@ _DURATION_BOUNDS: tuple[tuple[int | None, DurationBand], ...] = (
 )
 
 
+class FieldState(str, Enum):
+    """Why one video does or does not supply one metadata field.
+
+    CONFLICTING is kept separate from UNAVAILABLE on purpose: "two OBSERVED
+    records disagree about this video's title" is a different fact from "no
+    record carried a title", and collapsing them would hide a data-quality
+    problem behind a data-absence one.
+    """
+
+    AVAILABLE = "AVAILABLE"
+    UNAVAILABLE = "UNAVAILABLE"
+    CONFLICTING = "CONFLICTING"
+
+
 class ConcentrationState(str, Enum):
     """How a pattern's occurrences spread across creators. Unordered."""
 
@@ -227,6 +250,10 @@ class CooccurrenceState(str, Enum):
 
     # Milestone 5A produced no result for this scope.
     OUTLIER_EVIDENCE_UNAVAILABLE = "OUTLIER_EVIDENCE_UNAVAILABLE"
+    # A 5A result was supplied, but for a different candidate or research
+    # run. Video ids can collide across scopes, so consuming it would let
+    # another candidate's observations contaminate this one.
+    OUTLIER_SCOPE_MISMATCH = "OUTLIER_SCOPE_MISMATCH"
     # 5A ran and scored nothing above its own baselines.
     NO_QUALIFYING_OUTLIERS = "NO_QUALIFYING_OUTLIERS"
     # The pattern occurs among outliers, but too few independent creators
@@ -288,16 +315,38 @@ def _id_sort_key(value: object) -> tuple[str, str]:
 # ------------------------------------------------------------ normalization
 
 _INVISIBLE_RE = re.compile(r"[­​-‏  ﻿]")
-_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+# Unicode general categories that carry observed content. Letters (L*),
+# numbers (N*) and combining marks (M*) are kept; every other character
+# becomes a separator.
+#
+# An earlier version used `[^a-z0-9]+`, which silently DESTROYED observed
+# content: "café" became "caf", "naïve résumé" became "na ve r sum", and
+# Japanese or Arabic titles became the empty string entirely. A derivation
+# that deletes what a provider actually returned is not normalizing it, and
+# this milestone's own test had been written around the damage rather than
+# against it. Marks are kept because scripts such as Arabic and Devanagari
+# use combining marks NFKC does not compose away.
+_KEPT_CATEGORIES = ("L", "N", "M")
+
+
+def _is_content_char(char: str) -> bool:
+    return unicodedata.category(char)[0] in _KEPT_CATEGORIES
 
 
 def normalize_text(value: str) -> str:
     """Deterministic text normalization (`content_normalization_v1`).
 
     NFKC folds compatibility forms so a fullwidth and an ASCII rendering of
-    the same word are one token. Invisible characters are stripped, case is
-    folded, every non-alphanumeric run becomes a single space, and the result
-    is trimmed. No stemming, no lemmatization, no semantic clustering: this
+    the same word are one token, and composes decomposed sequences so NFC and
+    NFD spellings agree. Invisible characters are stripped, case is folded,
+    every run of non-content characters becomes a single space, and the
+    result is trimmed.
+
+    Observed content is PRESERVED, never deleted: accented Latin keeps its
+    accents and non-Latin scripts survive intact. Scripts that do not
+    separate words with spaces therefore yield one token per run, which is an
+    honest consequence of performing no segmentation rather than a silent
+    loss. No stemming, no lemmatization, no semantic clustering: this
     milestone introduces no LLM and no similarity model.
     """
     folded = unicodedata.normalize("NFKC", value)
@@ -305,7 +354,8 @@ def normalize_text(value: str) -> str:
     folded = folded.casefold()
     # Casefolding can produce new compatibility forms, so normalize again.
     folded = unicodedata.normalize("NFKC", folded)
-    return _NON_ALNUM_RE.sub(" ", folded).strip()
+    kept = "".join(char if _is_content_char(char) else " " for char in folded)
+    return " ".join(kept.split())
 
 
 def tokenize_title(value: str) -> tuple[str, ...]:
@@ -385,11 +435,16 @@ class ContentPattern:
 
 @dataclass(slots=True, frozen=True)
 class FieldAvailability:
-    """How many videos could have carried one metadata field."""
+    """How many videos could have carried one metadata field.
+
+    The three counts are disjoint and sum to the observed video count, so a
+    conflict can never be mistaken for an absence or for a usable value.
+    """
 
     field: str
     available_video_count: int
     unavailable_video_count: int
+    conflicting_video_count: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -424,6 +479,7 @@ class ContentPatternsResult:
 
     observed_video_count: int
     videos_without_channel_id: int
+    videos_with_conflicting_channel_id: int
     distinct_channel_count: int
     # Above-baseline observations 5A supplied for this scope, if any.
     outlier_observation_count: int
@@ -444,21 +500,50 @@ class ContentPatternsResult:
 # ------------------------------------------------------------------ internals
 
 
+_FIELDS = ("channel_id", "title", "tags", "category", "duration_seconds")
+
+
 @dataclass(slots=True)
-class _VideoRecord:
-    """One deduplicated video's metadata, rebuilt from OBSERVED records."""
+class _VideoAccumulator:
+    """Every OBSERVED value each field received, before resolution.
+
+    Values are COLLECTED rather than first-wins. Two distinct OBSERVED
+    records can disagree about the same video, and a first-wins rule makes
+    the winner depend on arrival order — so the same evidence delivered in a
+    different order would yield different patterns, different availability
+    and different creator concentration. Collecting and resolving makes the
+    outcome a function of the SET of records, not of their sequence.
+    """
 
     video_id: str
-    channel_id: str | None = None
-    title: str | None = None
-    tags: tuple[str, ...] | None = None
-    category: str | None = None
-    duration_seconds: int | None = None
+    values: dict[str, set] = None  # type: ignore[assignment]
     evidence_ids: list[UUID] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
+        if self.values is None:
+            self.values = {field: set() for field in _FIELDS}
         if self.evidence_ids is None:
             self.evidence_ids = []
+
+
+@dataclass(slots=True, frozen=True)
+class _VideoRecord:
+    """One deduplicated video's RESOLVED metadata.
+
+    A field is present only when every OBSERVED record that supplied it
+    agreed. Disagreement yields CONFLICTING, which is reported and excluded
+    from pattern extraction rather than silently resolved in favour of
+    whichever record happened to arrive first.
+    """
+
+    video_id: str
+    channel_id: str | None
+    title: str | None
+    tags: tuple[str, ...] | None
+    category: str | None
+    duration_seconds: int | None
+    states: dict[str, FieldState]
+    evidence_ids: tuple[UUID, ...]
 
 
 def _in_scope(
@@ -524,8 +609,12 @@ def _collect_videos(
 
     A record with no payload hash is never collapsed; its multiplicity stays
     visible in lineage exactly as Milestone 5A keeps it.
+
+    Values are COLLECTED per field and resolved afterwards by `_resolve`, so
+    two distinct OBSERVED records that disagree about the same video produce
+    a CONFLICTING field rather than whichever value happened to arrive first.
     """
-    by_video: dict[str, _VideoRecord] = {}
+    by_video: dict[str, _VideoAccumulator] = {}
     order: list[str] = []
     seen: set[tuple] = set()
     suppressed = 0
@@ -555,25 +644,61 @@ def _collect_videos(
         contributing.append(item)
 
         if video_id not in by_video:
-            by_video[video_id] = _VideoRecord(video_id=video_id)
+            by_video[video_id] = _VideoAccumulator(video_id=video_id)
             order.append(video_id)
-        record = by_video[video_id]
-        record.evidence_ids.append(item.id)
+        accumulator = by_video[video_id]
+        accumulator.evidence_ids.append(item.id)
 
-        # First OBSERVED record to supply a field wins; later records never
-        # overwrite it, so re-delivery cannot change a video's metadata.
-        if record.channel_id is None:
-            record.channel_id = _payload_string(payload, "channel_id")
-        if record.title is None:
-            record.title = _payload_string(payload, "title")
-        if record.tags is None:
-            record.tags = _payload_tags(payload)
-        if record.category is None:
-            record.category = _payload_string(payload, "category")
-        if record.duration_seconds is None:
-            record.duration_seconds = _payload_duration(payload)
+        # COLLECT every observed value rather than letting the first arrival
+        # win. Resolution happens afterwards, so the outcome is a function of
+        # the set of records and not of the order they arrived in.
+        for field, reader in (
+            ("channel_id", lambda pl: _payload_string(pl, "channel_id")),
+            ("title", lambda pl: _payload_string(pl, "title")),
+            ("tags", _payload_tags),
+            ("category", lambda pl: _payload_string(pl, "category")),
+            ("duration_seconds", _payload_duration),
+        ):
+            value = reader(payload)
+            if value is not None:
+                accumulator.values[field].add(value)
 
-    return [by_video[video_id] for video_id in order], suppressed, contributing
+    records = [_resolve(by_video[video_id]) for video_id in order]
+    return records, suppressed, contributing
+
+
+def _resolve(accumulator: _VideoAccumulator) -> _VideoRecord:
+    """Turn collected values into one record, flagging any disagreement.
+
+    Exactly one distinct observed value makes a field AVAILABLE. None makes
+    it UNAVAILABLE. Two or more makes it CONFLICTING: the field is excluded
+    from pattern extraction and reported, because picking a winner between
+    disagreeing OBSERVED records would be arbitrary, and picking the first
+    would make the result depend on arrival order.
+    """
+    resolved: dict[str, object] = {}
+    states: dict[str, FieldState] = {}
+    for field in _FIELDS:
+        values = accumulator.values[field]
+        if not values:
+            resolved[field] = None
+            states[field] = FieldState.UNAVAILABLE
+        elif len(values) == 1:
+            resolved[field] = next(iter(values))
+            states[field] = FieldState.AVAILABLE
+        else:
+            resolved[field] = None
+            states[field] = FieldState.CONFLICTING
+    return _VideoRecord(
+        video_id=accumulator.video_id,
+        channel_id=resolved["channel_id"],  # type: ignore[arg-type]
+        title=resolved["title"],  # type: ignore[arg-type]
+        tags=resolved["tags"],  # type: ignore[arg-type]
+        category=resolved["category"],  # type: ignore[arg-type]
+        duration_seconds=resolved["duration_seconds"],  # type: ignore[arg-type]
+        states=states,
+        evidence_ids=tuple(sorted(accumulator.evidence_ids)),
+    )
 
 
 def _feature_values(record: _VideoRecord) -> dict[PatternKind, tuple[str, ...]]:
@@ -637,14 +762,28 @@ def _concentration(
 
 def _outlier_video_ids(
     outlier_evidence: RobustContentIntelligenceResult | None,
-) -> dict[str, str | None] | None:
+    candidate_id: UUID,
+    research_run_id: UUID | None,
+) -> tuple[dict[str, str | None] | None, bool]:
     """Video ids Milestone 5A scored above their own creator's baseline.
 
-    Returns None when 5A supplied nothing for this scope, which is different
-    from 5A having run and found no qualifying observation.
+    Returns (video ids, scope_mismatch). The ids are None when 5A supplied
+    nothing, which is different from 5A having run and found no qualifying
+    observation, and different again from a scope mismatch.
+
+    The 5A result carries its own candidate_id and research_run_id, and both
+    are VERIFIED against this derivation's scope before a single observation
+    is consumed. Video ids are only unique within a scope, so a 5A result
+    from another candidate or run could otherwise contaminate co-occurrence
+    through colliding ids — silently, and with no trace in the output.
     """
     if outlier_evidence is None:
-        return None
+        return None, False
+    if (
+        outlier_evidence.candidate_id != candidate_id
+        or outlier_evidence.research_run_id != research_run_id
+    ):
+        return None, True
     above: dict[str, str | None] = {}
     for observation in outlier_evidence.observations:
         if observation.state != RobustOutlierObservationState.SCORED:
@@ -655,7 +794,7 @@ def _outlier_video_ids(
             continue
         if observation.relative_score > RELATIVE_SCORE_ABOVE_BASELINE:
             above[observation.video_id] = observation.channel_id
-    return above
+    return above, False
 
 
 def _cooccurrence(
@@ -664,11 +803,16 @@ def _cooccurrence(
     outliers: dict[str, str | None] | None,
     comparable_outlier_total: int,
     prevalence_share: float,
+    scope_mismatch: bool = False,
 ) -> OutlierCooccurrence:
     """Compare two shares. Never multiply, rank, or score them."""
     if outliers is None:
         return OutlierCooccurrence(
-            state=CooccurrenceState.OUTLIER_EVIDENCE_UNAVAILABLE,
+            state=(
+                CooccurrenceState.OUTLIER_SCOPE_MISMATCH
+                if scope_mismatch
+                else CooccurrenceState.OUTLIER_EVIDENCE_UNAVAILABLE
+            ),
             outlier_video_count=0,
             outlier_distinct_channel_count=0,
             comparable_outlier_total=0,
@@ -750,6 +894,7 @@ def _empty(
     field_availability: tuple[FieldAvailability, ...] = (),
     observed_video_count: int = 0,
     videos_without_channel_id: int = 0,
+    videos_with_conflicting_channel_id: int = 0,
     distinct_channel_count: int = 0,
     outlier_observation_count: int = 0,
     outlier_distinct_channel_count: int = 0,
@@ -767,6 +912,7 @@ def _empty(
         provenance=provenance,
         observed_video_count=observed_video_count,
         videos_without_channel_id=videos_without_channel_id,
+        videos_with_conflicting_channel_id=videos_with_conflicting_channel_id,
         distinct_channel_count=distinct_channel_count,
         outlier_observation_count=outlier_observation_count,
         outlier_distinct_channel_count=outlier_distinct_channel_count,
@@ -827,7 +973,12 @@ def derive_content_patterns(
             "no_public_content_observed_for_candidate",
         )
 
-    videos_without_channel = sum(1 for r in records if r.channel_id is None)
+    videos_without_channel = sum(
+        1 for r in records if r.states["channel_id"] is FieldState.UNAVAILABLE
+    )
+    videos_with_conflicting_channel = sum(
+        1 for r in records if r.states["channel_id"] is FieldState.CONFLICTING
+    )
     distinct_channels = len({r.channel_id for r in records if r.channel_id is not None})
 
     per_video = {r.video_id: _feature_values(r) for r in records}
@@ -836,16 +987,21 @@ def derive_content_patterns(
         FieldAvailability(
             field=field,
             available_video_count=sum(
-                1 for r in records if getattr(r, field) is not None
+                1 for r in records if r.states[field] is FieldState.AVAILABLE
             ),
             unavailable_video_count=sum(
-                1 for r in records if getattr(r, field) is None
+                1 for r in records if r.states[field] is FieldState.UNAVAILABLE
+            ),
+            conflicting_video_count=sum(
+                1 for r in records if r.states[field] is FieldState.CONFLICTING
             ),
         )
         for field in ("title", "tags", "category", "duration_seconds")
     )
 
-    outliers = _outlier_video_ids(outlier_evidence)
+    outliers, outlier_scope_mismatch = _outlier_video_ids(
+        outlier_evidence, candidate_id, research_run_id
+    )
     outlier_channels = (
         len({channel for channel in outliers.values() if channel is not None})
         if outliers is not None
@@ -863,6 +1019,7 @@ def derive_content_patterns(
             field_availability=availability,
             observed_video_count=len(records),
             videos_without_channel_id=videos_without_channel,
+            videos_with_conflicting_channel_id=videos_with_conflicting_channel,
             distinct_channel_count=distinct_channels,
             outlier_observation_count=len(outliers) if outliers is not None else 0,
             outlier_distinct_channel_count=outlier_channels,
@@ -872,7 +1029,7 @@ def derive_content_patterns(
     by_field_available: dict[PatternKind, int] = {}
     for kind, field in _KIND_FIELD.items():
         by_field_available[kind] = sum(
-            1 for r in records if getattr(r, field) is not None
+            1 for r in records if r.states[field] is FieldState.AVAILABLE
         )
 
     # Comparable outlier denominators are per FIELD: an outlier whose title
@@ -886,7 +1043,8 @@ def derive_content_patterns(
         comparable_outlier_totals[kind] = sum(
             1
             for r in records
-            if r.video_id in outliers and getattr(r, field) is not None
+            if r.video_id in outliers
+            and r.states[field] is FieldState.AVAILABLE
         )
 
     grouped: dict[tuple[PatternKind, str], list[_VideoRecord]] = {}
@@ -904,7 +1062,7 @@ def derive_content_patterns(
             PatternOccurrence(
                 video_id=r.video_id,
                 channel_id=r.channel_id,
-                evidence_ids=tuple(sorted(r.evidence_ids)),
+                evidence_ids=r.evidence_ids,
             )
             for r in ordered
         )
@@ -940,6 +1098,7 @@ def derive_content_patterns(
                     outliers,
                     comparable_outlier_totals[kind],
                     prevalence,
+                    outlier_scope_mismatch,
                 ),
             )
         )
@@ -959,6 +1118,7 @@ def derive_content_patterns(
             field_availability=availability,
             observed_video_count=len(records),
             videos_without_channel_id=videos_without_channel,
+            videos_with_conflicting_channel_id=videos_with_conflicting_channel,
             distinct_channel_count=distinct_channels,
             outlier_observation_count=len(outliers) if outliers is not None else 0,
             outlier_distinct_channel_count=outlier_channels,
@@ -978,6 +1138,7 @@ def derive_content_patterns(
         provenance=provenance,
         observed_video_count=len(records),
         videos_without_channel_id=videos_without_channel,
+        videos_with_conflicting_channel_id=videos_with_conflicting_channel,
         distinct_channel_count=distinct_channels,
         outlier_observation_count=len(outliers) if outliers is not None else 0,
         outlier_distinct_channel_count=outlier_channels,

@@ -24,6 +24,7 @@ Five rules carry the milestone.
 import ast
 import random
 import re
+import unicodedata
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -44,6 +45,7 @@ from app.services.content_patterns import (
     ContentPatternsState,
     CooccurrenceState,
     DurationBand,
+    FieldState,
     PatternKind,
     derive_content_patterns,
     duration_band,
@@ -195,18 +197,90 @@ def test_punctuation_differences_collapse_to_one_pattern():
     assert bigram.video_count == 3
 
 
-def test_unicode_equivalent_strings_collapse_to_one_pattern():
-    """NFC and NFD spellings, and fullwidth forms, are one token."""
+def test_unicode_equivalent_strings_collapse_to_one_preserved_token():
+    """NFC, NFD and fullwidth spellings are ONE token, and it keeps its accent.
+
+    The earlier version asserted only that the surviving token started with
+    "caf", which passes even when normalization has DELETED the accent. It
+    was written around a defect rather than against it.
+    """
     candidate_id, evidence = corpus(
-        ("V1", "UC_A", "café planner"),          # café precomposed
-        ("V2", "UC_B", "café planner"),          # cafe + combining acute
-        ("V3", "UC_C", "ｃａｆｅ́ planner"),  # fullwidth
+        ("V1", "UC_A", unicodedata.normalize("NFC", "café planner")),
+        ("V2", "UC_B", unicodedata.normalize("NFD", "café planner")),
+        ("V3", "UC_C", "ｃａｆｅ́ planner"),
     )
     result = run(evidence, candidate_id)
+    token = pattern_for(result, PatternKind.TITLE_TOKEN, "café")
+    assert token is not None, sorted(
+        p.value for p in result.patterns if p.kind is PatternKind.TITLE_TOKEN
+    )
+    assert token.video_count == 3
+    assert token.distinct_channel_count == 3
+
+
+def test_accented_latin_text_is_preserved_not_stripped():
+    """Accents are content. Deleting them changes what was observed."""
+    assert normalize_text("café") == "café"
+    assert normalize_text("naïve résumé") == "naïve résumé"
+    assert normalize_text("Ünïcödé plan") == "ünïcödé plan"
+    assert tokenize_title("naïve résumé guide") == (
+        "naïve", "résumé", "guide",
+    )
+
+
+@pytest.mark.parametrize(
+    ("script", "text", "expected"),
+    [
+        ("Japanese", "日本語のタイトル 計画",
+         ("日本語のタイトル", "計画")),
+        ("Arabic", "مرحبا بالعالم",
+         ("مرحبا", "بالعالم")),
+        # Greek final sigma casefolds to sigma by design, so the same word
+        # in medial and final position collapses to one token.
+        ("Greek", "Σχέδιο Γεύματος",
+         ("σχέδιο", "γεύματοσ")),
+        ("Cyrillic", "План питания",
+         ("план", "питания")),
+    ],
+)
+def test_non_latin_scripts_survive_normalization(script, text, expected):
+    """A non-Latin title must not normalize to the empty string.
+
+    An earlier version stripped every non-ASCII character, so Japanese and
+    Arabic titles vanished entirely and those videos silently contributed no
+    title pattern at all.
+    """
+    assert normalize_text(text) != ""
+    assert tokenize_title(text) == expected, (script, tokenize_title(text))
+
+
+def test_non_latin_patterns_are_extracted_and_order_independent():
+    candidate_id = uuid4()
+    titles = [
+        "日本語のタイトル 計画",
+        "日本語のタイトル 計画",
+        "مرحبا بالعالم",
+        "مرحبا بالعالم",
+    ]
+    evidence: list[EvidenceItem] = []
+    for index, title in enumerate(titles):
+        evidence.extend(
+            video_evidence(
+                f"V{index}", candidate_id=candidate_id,
+                channel_id=f"UC_{index}", title=title,
+            )
+        )
+    result = run(evidence, candidate_id)
     values = {p.value for p in result.patterns if p.kind is PatternKind.TITLE_TOKEN}
-    cafe_like = [v for v in values if v.startswith("caf")]
-    assert len(cafe_like) == 1, cafe_like
-    assert pattern_for(result, PatternKind.TITLE_TOKEN, cafe_like[0]).video_count == 3
+    assert "日本語のタイトル" in values
+    assert "مرحبا" in values
+
+    baseline = _identity(result)
+    rng = random.Random(4)
+    for _ in range(200):
+        shuffled = list(evidence)
+        rng.shuffle(shuffled)
+        assert _identity(run(shuffled, candidate_id)) == baseline
 
 
 def test_identical_titles_are_counted_per_video_not_per_word():
@@ -548,22 +622,114 @@ def test_duplicate_video_identity_across_records_is_one_video():
     assert {o.video_id for o in token.occurrences} == {"SAME", "OTHER"}
 
 
-def test_later_records_never_overwrite_an_established_field():
-    """Re-delivery cannot change a video's metadata."""
-    candidate_id = uuid4()
+def _conflicting_corpus(candidate_id: UUID) -> list[EvidenceItem]:
+    """Two distinct OBSERVED records disagreeing about the SAME video.
+
+    Both are non-duplicate (different payload hashes) so neither is
+    suppressed, and they disagree on title, channel, tags, category and
+    duration at once.
+    """
     first = video_evidence(
-        "V", candidate_id=candidate_id, title="original phrasing",
-        payload_hash="h1",
+        "SAME", candidate_id=candidate_id, channel_id="UC_A",
+        title="alpha bravo charlie", tags=["alpha"], category="Education",
+        duration_seconds=100, payload_hash="h1",
     )
+    second = video_evidence(
+        "SAME", candidate_id=candidate_id, channel_id="UC_B",
+        title="delta echo foxtrot", tags=["delta"], category="Entertainment",
+        duration_seconds=2000, payload_hash="h2",
+    )
+    peer = video_evidence(
+        "PEER", candidate_id=candidate_id, channel_id="UC_C",
+        title="alpha bravo delta echo", tags=["alpha", "delta"],
+        category="Education", duration_seconds=100, payload_hash="h3",
+    )
+    return first + second + peer
+
+
+def test_conflicting_observed_records_are_reported_not_silently_resolved():
+    """Disagreeing OBSERVED records make the field CONFLICTING, not first-wins.
+
+    An earlier version took the first record to supply a field, which made
+    the selected metadata -- and therefore the patterns, the availability
+    counts and the creator concentration -- depend on arrival order.
+    """
+    candidate_id = uuid4()
+    result = run(_conflicting_corpus(candidate_id), candidate_id)
+
+    assert result.observed_video_count == 2
+    tokens = {p.value for p in result.patterns if p.kind is PatternKind.TITLE_TOKEN}
+    assert "charlie" not in tokens
+    assert "foxtrot" not in tokens
+
+    for field in ("title", "tags", "category", "duration_seconds"):
+        entry = next(e for e in result.field_availability if e.field == field)
+        assert entry.conflicting_video_count == 1, field
+        assert entry.available_video_count == 1, field
+        assert entry.unavailable_video_count == 0, field
+        assert (
+            entry.available_video_count
+            + entry.unavailable_video_count
+            + entry.conflicting_video_count
+            == result.observed_video_count
+        )
+
+    assert result.videos_with_conflicting_channel_id == 1
+    assert result.videos_without_channel_id == 0
+    assert result.provenance.channel_ids == ("UC_C",)
+
+
+def test_conflicting_records_are_order_independent_forward_reversed_shuffled():
+    """The blocker: same evidence, any order, byte-identical result."""
+    candidate_id = uuid4()
+    evidence = _conflicting_corpus(candidate_id)
+
+    forward = _identity(run(evidence, candidate_id))
+    assert _identity(run(list(reversed(evidence)), candidate_id)) == forward
+
+    rng = random.Random(20260911)
+    for _ in range(500):
+        shuffled = list(evidence)
+        rng.shuffle(shuffled)
+        assert _identity(run(shuffled, candidate_id)) == forward
+
+
+def test_conflict_differs_from_absence_and_from_agreement():
+    """Three outcomes, three states, never collapsed into one."""
+    candidate_id = uuid4()
+    # Two videos carry the title, so it can recur; the first is described by
+    # two AGREEING records, which must not read as a conflict.
+    agreeing = video_evidence(
+        "AGREE", candidate_id=candidate_id, channel_id="UC_A",
+        title="alpha bravo", payload_hash="a1",
+    ) + video_evidence(
+        "AGREE", candidate_id=candidate_id, channel_id="UC_A",
+        title="alpha bravo", payload_hash="a2",
+    ) + video_evidence(
+        "AGREE2", candidate_id=candidate_id, channel_id="UC_B",
+        title="alpha bravo", payload_hash="a3",
+    )
+    absent = video_evidence("ABSENT", candidate_id=candidate_id, title=None)
     conflicting = video_evidence(
-        "V", candidate_id=candidate_id, title="completely different words",
-        payload_hash="h2",
+        "CONFLICT", candidate_id=candidate_id, title="alpha bravo", payload_hash="c1"
+    ) + video_evidence(
+        "CONFLICT", candidate_id=candidate_id, title="delta echo", payload_hash="c2"
     )
-    forward = run(first + conflicting, candidate_id)
-    assert forward.observed_video_count == 1
-    # Only the first OBSERVED record's title contributed.
-    tokens = {p.value for p in forward.patterns if p.kind is PatternKind.TITLE_TOKEN}
-    assert "different" not in tokens
+    result = run(agreeing + absent + conflicting, candidate_id)
+    title = next(e for e in result.field_availability if e.field == "title")
+    assert (
+        title.available_video_count,
+        title.unavailable_video_count,
+        title.conflicting_video_count,
+    ) == (2, 1, 1)
+    # Agreement between two records is NOT a conflict: the field survives
+    # and still contributes its tokens.
+    assert FieldState.AVAILABLE is not FieldState.CONFLICTING
+    tokens = {p.value for p in result.patterns if p.kind is PatternKind.TITLE_TOKEN}
+    assert "alpha" in tokens and "bravo" in tokens
+    # ...and the conflicted video's competing values contribute nothing.
+    assert "charlie" not in tokens and "foxtrot" not in tokens
+
 
 
 def _identity(result) -> tuple:
@@ -1118,3 +1284,164 @@ def test_5b_is_not_wired_into_any_route():
     assert not hasattr(routes, "derive_content_patterns")
     source = Path("app/api/routes.py").read_text()
     assert "content_patterns" not in source
+
+def test_greek_final_sigma_folds_to_one_token():
+    """Casefolding exists so final and medial sigma compare equal."""
+    assert normalize_text("Γεύματος") == normalize_text("γεύματοσ")
+    assert tokenize_title("ΣΧΈΔΙΟ") == tokenize_title("σχέδιο")
+
+
+# ------------------------------------------------- 5A scope verification
+
+
+def _outlier_scope(candidate_id: UUID, research_run_id: UUID | None = None):
+    """A 4-creator corpus plus the 5A result derived from the same scope."""
+    evidence: list[EvidenceItem] = []
+    for index in range(4):
+        channel = f"UC_{index}"
+        rows = [
+            (f"W{index}", 10_000, "secret hook plan"),
+            (f"L{index}a", 100, "ordinary plan"),
+            (f"L{index}b", 90, "ordinary plan"),
+        ]
+        for video_id, views, title in rows:
+            evidence.extend(
+                video_evidence(
+                    video_id, candidate_id=candidate_id, channel_id=channel,
+                    title=title, views=views, research_run_id=research_run_id,
+                )
+            )
+    outlier = derive_robust_content_intelligence(
+        candidate_id=candidate_id, evidence=evidence,
+        research_run_id=research_run_id,
+    )
+    return evidence, outlier
+
+
+def test_matching_5a_scope_is_consumed():
+    candidate_id = uuid4()
+    evidence, outlier = _outlier_scope(candidate_id)
+    result = run(evidence, candidate_id, outlier_evidence=outlier)
+    hook = pattern_for(result, PatternKind.TITLE_TOKEN, "secret")
+    assert result.outlier_evidence_available is True
+    assert hook.cooccurrence.state is CooccurrenceState.OVER_REPRESENTED
+    assert hook.cooccurrence.outlier_video_count == 4
+
+
+def test_a_5a_result_for_another_candidate_is_refused_not_consumed():
+    """Video ids only mean something within a scope.
+
+    A 5A result from another candidate carrying colliding video ids would
+    otherwise contaminate co-occurrence silently, with no trace in the
+    output. It is refused, and pattern extraction continues normally.
+    """
+    mine = uuid4()
+    theirs = uuid4()
+    my_evidence, _ = _outlier_scope(mine)
+    _, foreign = _outlier_scope(theirs)
+    assert foreign.candidate_id != mine
+
+    result = run(my_evidence, mine, outlier_evidence=foreign)
+    hook = pattern_for(result, PatternKind.TITLE_TOKEN, "secret")
+    assert hook.cooccurrence.state is CooccurrenceState.OUTLIER_SCOPE_MISMATCH
+    assert hook.cooccurrence.outlier_video_count == 0
+    assert hook.cooccurrence.outlier_distinct_channel_count == 0
+    assert hook.cooccurrence.share_among_outliers is None
+    assert result.outlier_evidence_available is False
+    assert result.outlier_observation_count == 0
+    # Pattern extraction is untouched by the refusal.
+    assert result.pattern_state is ContentPatternsState.PATTERNS_OBSERVED
+    assert hook.video_count == 4
+    assert hook.cooccurrence.share_in_corpus == hook.prevalence_share
+
+
+def test_a_5a_result_from_another_research_run_is_refused():
+    candidate_id = uuid4()
+    run_a = uuid4()
+    run_b = uuid4()
+    evidence_a, _ = _outlier_scope(candidate_id, research_run_id=run_a)
+    _, outlier_b = _outlier_scope(candidate_id, research_run_id=run_b)
+    assert outlier_b.candidate_id == candidate_id
+    assert outlier_b.research_run_id != run_a
+
+    result = run(
+        evidence_a, candidate_id,
+        research_run_id=run_a, outlier_evidence=outlier_b,
+    )
+    hook = pattern_for(result, PatternKind.TITLE_TOKEN, "secret")
+    assert hook.cooccurrence.state is CooccurrenceState.OUTLIER_SCOPE_MISMATCH
+    assert hook.cooccurrence.outlier_video_count == 0
+    assert result.outlier_evidence_available is False
+    assert result.pattern_state is ContentPatternsState.PATTERNS_OBSERVED
+
+
+def test_a_runless_5a_result_is_refused_for_a_run_scoped_derivation():
+    """None and a run id are different scopes, not compatible ones."""
+    candidate_id = uuid4()
+    research_run_id = uuid4()
+    evidence, _ = _outlier_scope(candidate_id, research_run_id=research_run_id)
+    _, runless = _outlier_scope(candidate_id)
+    assert runless.research_run_id is None
+
+    result = run(
+        evidence, candidate_id,
+        research_run_id=research_run_id, outlier_evidence=runless,
+    )
+    hook = pattern_for(result, PatternKind.TITLE_TOKEN, "secret")
+    assert hook.cooccurrence.state is CooccurrenceState.OUTLIER_SCOPE_MISMATCH
+
+
+def test_scope_mismatch_is_distinct_from_unavailable_and_from_no_outliers():
+    """Three different facts, three different states."""
+    candidate_id = uuid4()
+    evidence, outlier = _outlier_scope(candidate_id)
+    _, foreign = _outlier_scope(uuid4())
+
+    states = {
+        run(evidence, candidate_id, outlier_evidence=None)
+        .patterns[0].cooccurrence.state,
+        run(evidence, candidate_id, outlier_evidence=foreign)
+        .patterns[0].cooccurrence.state,
+    }
+    assert CooccurrenceState.OUTLIER_EVIDENCE_UNAVAILABLE in states
+    assert CooccurrenceState.OUTLIER_SCOPE_MISMATCH in states
+    assert len(states) == 2
+    # And the matching scope produces neither.
+    matched = run(evidence, candidate_id, outlier_evidence=outlier)
+    assert matched.patterns[0].cooccurrence.state not in states
+
+
+def test_digits_are_content_and_are_preserved():
+    """"30 day plan" and "5 meal plans" carry their numbers.
+
+    A mutation that kept only letters passed every other test, because
+    nothing exercised a numeric token.
+    """
+    assert normalize_text("30 day plan") == "30 day plan"
+    assert tokenize_title("30 Day Meal Plan") == ("30", "day", "meal", "plan")
+    assert tokenize_title("5 meal plans") == ("meal", "plans")  # "5" is 1 char
+    candidate_id, evidence = corpus(
+        ("V1", "UC_A", "30 day meal plan"),
+        ("V2", "UC_B", "30 day plan"),
+    )
+    result = run(evidence, candidate_id)
+    assert pattern_for(result, PatternKind.TITLE_TOKEN, "30") is not None
+
+
+def test_combining_marks_are_preserved_for_scripts_nfkc_does_not_compose():
+    """Devanagari matras and Arabic diacritics are letters' vowels.
+
+    Dropping category-M characters would silently rewrite these words into
+    different words, which is the same class of damage as stripping accents.
+    """
+    devanagari = "योजना बनाना"
+    arabic_vocalised = "مُرَحَّبا"
+    for text in (devanagari, arabic_vocalised):
+        normalized = normalize_text(text)
+        assert normalized != ""
+        # Every combining mark present in the source survives.
+        marks = {c for c in unicodedata.normalize("NFKC", text)
+                 if unicodedata.category(c).startswith("M")}
+        assert marks, text
+        assert marks <= set(normalized), text
+    assert tokenize_title(devanagari) == ("योजना", "बनाना")

@@ -1428,11 +1428,42 @@ title in a payload behind an UNKNOWN record and asserts it is never read.
 #### Deterministic normalization, no semantic clustering
 
 `content_normalization_v1` is NFKC, invisible-character stripping, casefold,
-punctuation-to-space and trim. Casing, punctuation and Unicode-equivalent
+non-content-to-space and trim. Casing, punctuation and Unicode-equivalent
 spellings collapse to one pattern; a word repeated inside one title is one
 video's use of it. `duration_band_v1` fixes five non-overlapping bands that
 tile the non-negative line. No stemming, no lemmatization, and **no LLM** in
 this milestone.
+
+**Observed content is preserved, never deleted.** Characters in Unicode
+categories L (letters), N (numbers) and M (combining marks) are kept;
+everything else becomes a separator. Accented Latin keeps its accents, digits
+survive, and non-Latin scripts survive intact — Devanagari matras and Arabic
+diacritics included, because NFKC does not compose those away. Scripts that
+do not separate words with spaces yield one token per run, which is an honest
+consequence of performing no segmentation.
+
+#### Disagreeing records are reported, not silently resolved
+
+Two distinct OBSERVED records can describe the same video and disagree. A
+first-wins rule would make the selected metadata — and therefore the
+patterns, the availability counts and the creator concentration — depend on
+arrival order. Values are therefore **collected per field and resolved
+afterwards**: one distinct value makes the field `AVAILABLE`, none makes it
+`UNAVAILABLE`, and two or more make it `CONFLICTING`. A conflicting field is
+excluded from pattern extraction and counted separately, so a data-quality
+problem is never hidden behind a data-absence one. The three counts are
+disjoint and sum to the observed video count.
+
+#### Milestone 5A evidence is verified before it is consumed
+
+A `RobustContentIntelligenceResult` carries its own `candidate_id` and
+`research_run_id`, and **both are checked** against this derivation's scope
+before a single observation is read. Video ids are unique only within a
+scope, so a 5A result from another candidate or run could otherwise
+contaminate co-occurrence through colliding ids, silently and with no trace
+in the output. A mismatch yields `OUTLIER_SCOPE_MISMATCH` — distinct from
+`OUTLIER_EVIDENCE_UNAVAILABLE` and from `NO_QUALIFYING_OUTLIERS` — and
+pattern extraction continues normally.
 
 #### What 5B never emits
 

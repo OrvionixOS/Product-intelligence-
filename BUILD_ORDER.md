@@ -340,8 +340,16 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   comparison is reported
 - Missing title/tags/category/duration stays UNAVAILABLE for that field,
   shrinks that field's denominator, and is never counted as absence or zero
-- Deterministic NFKC + casefold + punctuation normalization and fixed
-  duration bands; no stemming, no semantic clustering, no LLM
+- Deterministic NFKC + casefold normalization preserving Unicode letters,
+  numbers and combining marks, plus fixed duration bands; no stemming, no
+  semantic clustering, no LLM. Observed content is never deleted: accented
+  Latin, digits and non-Latin scripts all survive
+- Two OBSERVED records that disagree about the same video make that field
+  CONFLICTING — reported and excluded, never resolved by arrival order, so
+  the result is a function of the record SET rather than its sequence
+- Milestone 5A evidence is consumed only after its candidate_id and
+  research_run_id are verified against this derivation's scope; a mismatch
+  is reported as OUTLIER_SCOPE_MISMATCH and no observation is read
 - No numeric score of any kind, no 0-100 value, no RED/YELLOW/GREEN, no POS
   or ECS change; `value` is permanently `None` and the dimension name is
   `preliminary_content_patterns`
