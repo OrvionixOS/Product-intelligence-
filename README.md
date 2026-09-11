@@ -4,7 +4,10 @@ Evidence-backed digital-product opportunity engine.
 
 ## Current state
 
-Milestone 0 is implemented:
+Milestones 0 through 4G and Milestone 5A are implemented. The foundation
+below remains the Milestone 0 contract; later sections document the completed
+research, derivation, product-specification, fit, and content-intelligence
+slices:
 
 - Evidence truth model
 - Opportunity dimensions
@@ -1334,6 +1337,37 @@ endpoint is added or changed, and there is no schema migration.
   fact, and is neither a defect nor an advantage.
 - Structural suitability says nothing about execution quality: a well-fitted
   format can still be built badly.
+
+Milestone 5A (robust creator-relative outlier evidence) is implemented:
+
+- `app/services/faceless_content_intelligence.py` is a pure derivation over
+  already-collected Milestone 3B public-content evidence. It makes no
+  provider or network calls, writes no persistence records, and adds no
+  endpoint. It is deliberately separate from the existing
+  `content_outlier_v1` foundation, which is unchanged.
+- The derivation is scoped to one candidate and one research run. It accepts
+  only `purpose=AUDIENCE` / `signal_type=public_video_view_count` evidence,
+  and the evidence record is authoritative: a payload value cannot upgrade
+  an UNKNOWN record.
+- Only `TruthClass.OBSERVED` view counts contribute to creator baselines or
+  scores. Unknown view counts remain UNKNOWN; observed zero remains a real
+  zero and is never converted to missing or adjusted with an epsilon.
+- A creator baseline requires at least three unique observed-view videos and
+  is their median view count. The separately versioned
+  `robust_content_outlier_v1` relative score is exactly
+  `log2(video_views / creator_median_views)` and is calculated only when both
+  values are strictly positive.
+- A zero baseline, missing video/channel identity, insufficient creator
+  sample, conflicting observations, and unavailable/invalid view counts have
+  explicit non-scoreable states. Missing channel ids never form a synthetic
+  creator.
+- Publication time and channel aggregate metrics are not read. The result
+  carries no candidate-level numeric value and establishes no demand, buyer,
+  conversion, market-size, sales, revenue, or commercial conclusion.
+- `tests/test_faceless_content_intelligence.py` covers formula correctness,
+  scope isolation, UNKNOWN-versus-zero semantics, zero baselines, identity
+  boundaries, duplicate suppression, canonical provenance, shuffle
+  invariance, forbidden fields, and the no-network contract.
 
 ### Known technical debt
 

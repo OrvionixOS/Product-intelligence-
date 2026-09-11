@@ -291,7 +291,32 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   and never the legacy `ScoreDimensions.problem_product_fit`
 
 ## Milestone 5 — Faceless content intelligence
-- YouTube creator baseline
-- Robust outlier scoring
+
+### Milestone 5A — Robust creator-relative outlier evidence (implemented)
+- Pure derivation over already-collected Milestone 3B public-content
+  evidence; no provider calls, network calls, persistence, or new endpoint
+- Separate `faceless_content_intelligence_v1` and
+  `robust_content_outlier_v1` versions; the existing `content_outlier_v1`
+  ratio is unchanged
+- Candidate and research-run scoped evidence reads, with only
+  `purpose=AUDIENCE` / `signal_type=public_video_view_count` records in scope
+- Only `TruthClass.OBSERVED` view counts contribute. UNKNOWN counts remain
+  UNKNOWN and are never zero-filled or read from a payload snapshot
+- Creator baseline requires at least three unique observed-view videos and is
+  the median observed view count for that creator
+- Relative score is exactly
+  `log2(video_views / creator_median_views)` and is calculated only when both
+  values are strictly greater than zero
+- A zero creator baseline is reported as a structured non-scoreable state;
+  no epsilon, offset, or fabricated value is used
+- Missing video/channel identity, conflicting observations, insufficient
+  samples, observed zero values, and unavailable view counts remain distinct
+  non-scoreable states; missing channel ids never form a synthetic creator
+- Publication age and subscriber/channel aggregate metrics are not read;
+  no demand, buyer, conversion, market-size, sales, revenue, or candidate
+  score is produced
+- Canonical evidence lineage and shuffled-input determinism are tested
+
+### Remaining Milestone 5 scope
 - Content pattern extraction
 - 30 production-ready experiments
