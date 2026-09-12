@@ -398,10 +398,18 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   breadth, observation count, presence of a 5A comparison, then a canonical
   tie-break — and every ordering input is emitted so the order can be
   recomputed by hand. Ordering is not scoring
-- Material distinctness: two patterns in the same production family covering
-  exactly the same observed videos are one experiment, because the evidence
-  cannot separate them. The runner-up is recorded as an equivalent variable
-  rather than dropped, and the count is reported
+- Material distinctness is judged on the INTERVENTION, never on the observed
+  videos. Co-extensive patterns stay distinct experiments: different token
+  values, token versus bigram, and different tags/categories/duration bands
+  are all independently manipulable. Suppression fires only when two
+  candidates canonicalize to the same intervention and would produce
+  byte-identical instructions; the cap bounds volume instead
+- The emitted success criterion is executable: `evaluate_success_criterion()`
+  applies it, and a test holds the wording and the implementation together.
+  Unknown publication outcomes are excluded from the count rather than
+  counted as below, fewer than MIN_TEST_PUBLICATIONS known outcomes yields
+  no decision rather than a stop, and the decision is a count over a set so
+  it cannot depend on evaluation order
 - Never manufactures experiments to reach the cap. GenerationState says
   whether evidence was exhausted or the cap bound the result, alongside
   observed / eligible / below-floor / suppressed / generated counts
@@ -419,7 +427,7 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - No numeric score of any kind, no RED/YELLOW/GREEN, no POS or ECS change;
   `value` is permanently `None` and the dimension is
   `preliminary_content_experiments`. Derived experiments stay INFERRED
-- 30 mutations of the milestone's boundaries were applied; 29 were killed and
+- 39 mutations of the milestone's boundaries were applied; 38 were killed and
   one is a documented equivalent mutant (a deliberate redundancy over a 5B
   guarantee that is itself pinned by a test)
 

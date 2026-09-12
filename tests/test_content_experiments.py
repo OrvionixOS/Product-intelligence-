@@ -56,10 +56,13 @@ from app.services.content_experiments import (
     STATE_BOUNDARIES,
     BaselineState,
     EvidenceSufficiency,
+    ExperimentDecision,
     ExperimentsState,
     GenerationState,
+    PublicationOutcome,
     VariableFamily,
     derive_content_experiments,
+    evaluate_success_criterion,
 )
 from app.services.faceless_content_intelligence import (
     derive_robust_content_intelligence,
@@ -209,17 +212,14 @@ def experiment_for(result, kind: PatternKind, value: str):
     )
 
 
-def title_experiment(result):
-    """The retained TITLE-family experiment.
+def title_experiment(result, value: str = "meal"):
+    """One named TITLE_TOKEN experiment, for evidence and lineage assertions.
 
-    Tokens and bigrams that cover the same videos collapse into one
-    experiment by the material-distinctness rule, so which specific token
-    survives is a property of that rule, not something a concentration or
-    lineage test should assume.
+    Co-extensive title variables are separate experiments, so a test that
+    cares about the underlying evidence names the token it means rather than
+    taking whichever happens to sort first.
     """
-    return next(
-        e for e in result.experiments if e.variable_family is VariableFamily.TITLE
-    )
+    return experiment_for(result, PatternKind.TITLE_TOKEN, value)
 
 
 def _outlier_corpus(candidate_id: UUID) -> list[EvidenceItem]:
@@ -692,8 +692,17 @@ def test_the_cap_selects_deterministically_not_arbitrarily():
         ] == baseline
 
 
-def test_experiments_are_materially_distinct_not_superficial_variations():
-    """Co-extensive variables in one family are one experiment, and say so."""
+def test_co_extensive_variables_remain_distinct_experiments():
+    """Observational co-occurrence is NOT experimental equivalence.
+
+    "meal", "plan" and the phrase "meal plan" occur in exactly the same three
+    videos here, but a producer manipulates each of them separately: writing
+    a title containing "meal" is a different intervention from writing one
+    containing "plan", and both differ from requiring the two adjacent. An
+    earlier version grouped by (family, observed video set) and suppressed
+    two of the three, which mistook a property of the sample for a property
+    of the intervention and silently discarded testable variables.
+    """
     candidate_id = uuid4()
     evidence: list[EvidenceItem] = []
     for index, channel in enumerate(("UC_A", "UC_B", "UC_C")):
@@ -705,13 +714,45 @@ def test_experiments_are_materially_distinct_not_superficial_variations():
             )
         )
     result = run(evidence, candidate_id)
-    # "meal", "plan" and "meal plan" all cover exactly the same three videos.
-    assert result.generated_experiment_count == 1
-    assert result.suppressed_as_equivalent_count == 2
-    only = result.experiments[0]
-    recorded = {(e.kind, e.value) for e in only.equivalent_variables}
-    assert (PatternKind.TITLE_TOKEN, "meal") in recorded
-    assert (PatternKind.TITLE_TOKEN, "plan") in recorded
+
+    meal = experiment_for(result, PatternKind.TITLE_TOKEN, "meal")
+    plan = experiment_for(result, PatternKind.TITLE_TOKEN, "plan")
+    phrase = experiment_for(result, PatternKind.TITLE_BIGRAM, "meal plan")
+    assert meal is not None and plan is not None and phrase is not None
+
+    # They really are co-extensive in the observed corpus...
+    assert meal.evidence.video_ids == plan.evidence.video_ids
+    assert meal.evidence.video_ids == phrase.evidence.video_ids
+    # ...and they are still three separate experiments.
+    assert result.generated_experiment_count == 3
+    assert result.suppressed_as_equivalent_count == 0
+    assert len({e.experiment_id for e in (meal, plan, phrase)}) == 3
+    for experiment in (meal, plan, phrase):
+        assert experiment.equivalent_variables == ()
+    # Each carries its own intervention instruction.
+    assert "'meal'" in meal.instructions.title_structure
+    assert "'plan'" in plan.instructions.title_structure
+    assert "'meal plan'" in phrase.instructions.title_structure
+    assert "adjacent" in phrase.instructions.title_structure
+
+
+def test_a_token_is_never_collapsed_into_a_bigram_that_contains_it():
+    """Containment is not equivalence, even at identical counts."""
+    candidate_id = uuid4()
+    evidence: list[EvidenceItem] = []
+    for index, channel in enumerate(("UC_A", "UC_B", "UC_C", "UC_D")):
+        evidence.extend(
+            video_evidence(
+                f"V{index}", candidate_id=candidate_id, channel_id=channel,
+                title="budget grocery", tags=_UNSET, category=None,
+                duration_seconds=_UNSET,
+            )
+        )
+    result = run(evidence, candidate_id)
+    values = {(e.variable_kind, e.variable_value) for e in result.experiments}
+    assert (PatternKind.TITLE_TOKEN, "budget") in values
+    assert (PatternKind.TITLE_TOKEN, "grocery") in values
+    assert (PatternKind.TITLE_BIGRAM, "budget grocery") in values
 
 
 def test_variables_over_different_video_sets_stay_separate_experiments():
@@ -726,16 +767,15 @@ def test_variables_over_different_video_sets_stay_separate_experiments():
             )
         )
     result = run(evidence, candidate_id)
-    title_experiments = [
-        e for e in result.experiments if e.variable_family is VariableFamily.TITLE
-    ]
-    # "alpha" covers all three videos; the "bravo" family covers only two.
-    # Different evidence, so they stay separate experiments even though both
-    # move the same lever.
-    assert len(title_experiments) == 2
-    covered = {e.evidence.video_ids for e in title_experiments}
-    assert covered == {("V0", "V1", "V2"), ("V0", "V1")}
-    assert "alpha" in {e.variable_value for e in title_experiments}
+    alpha = experiment_for(result, PatternKind.TITLE_TOKEN, "alpha")
+    bravo = experiment_for(result, PatternKind.TITLE_TOKEN, "bravo")
+    phrase = experiment_for(result, PatternKind.TITLE_BIGRAM, "alpha bravo")
+    # "alpha" covers all three videos; "bravo" and the phrase cover two. The
+    # evidence differs and the interventions differ, so all three stand.
+    assert alpha.evidence.video_ids == ("V0", "V1", "V2")
+    assert bravo.evidence.video_ids == ("V0", "V1")
+    assert phrase.evidence.video_ids == ("V0", "V1")
+    assert len({alpha.experiment_id, bravo.experiment_id, phrase.experiment_id}) == 3
 
 
 def test_different_families_over_the_same_videos_are_not_collapsed():
@@ -1141,39 +1181,159 @@ def test_sufficiency_outranks_creator_breadth_in_the_ordering():
     assert bravo.ordering_rank < alpha.ordering_rank
 
 
-def test_the_retained_representative_follows_the_rule_not_the_input_order():
-    """5C must not inherit whatever order 5B happened to emit patterns in."""
+def _tag_pattern(value: str, channels: list[str]):
+    """A TAG pattern whose occurrences come from the given creators."""
     from app.services.content_patterns import (
         ContentPattern,
-        ContentPatternProvenance,
-        ContentPatternsResult,
         OutlierCooccurrence,
         PatternOccurrence,
+    )
+
+    occurrences = tuple(
+        PatternOccurrence(
+            video_id=f"V{index}_{channel}",
+            channel_id=channel,
+            channel_state=FieldState.AVAILABLE,
+            evidence_ids=(uuid4(),),
+        )
+        for index, channel in enumerate(channels)
+    )
+    counts = {c: channels.count(c) for c in set(channels)}
+    return ContentPattern(
+        kind=PatternKind.TAG,
+        value=value,
+        video_count=len(channels),
+        field_available_video_count=len(channels),
+        prevalence_share=1.0,
+        distinct_channel_count=len(counts),
+        videos_without_channel_id=0,
+        videos_with_conflicting_channel_id=0,
+        top_channel_share=round(max(counts.values()) / len(channels), 4),
+        concentration=(
+            ConcentrationState.SINGLE_CREATOR
+            if len(counts) == 1
+            else ConcentrationState.MULTI_CREATOR
+        ),
+        occurrences=occurrences,
+        evidence_ids=tuple(
+            sorted(eid for o in occurrences for eid in o.evidence_ids)
+        ),
+        cooccurrence=OutlierCooccurrence(
+            state=CooccurrenceState.OUTLIER_EVIDENCE_UNAVAILABLE,
+            outlier_video_count=0,
+            outlier_distinct_channel_count=0,
+            comparable_outlier_total=0,
+            share_among_outliers=None,
+            share_in_corpus=1.0,
+        ),
+    )
+
+
+def _result_with(candidate_id: UUID, patterns_tuple):
+    from app.services.content_patterns import (
+        ContentPatternProvenance,
+        ContentPatternsResult,
     )
     from app.services.content_patterns import (
         STATE_BOUNDARIES as PATTERN_BOUNDARIES,
     )
 
+    state = ContentPatternsState.PATTERNS_OBSERVED
+    evidence_ids = tuple(
+        sorted({eid for p in patterns_tuple for eid in p.evidence_ids})
+    )
+    return ContentPatternsResult(
+        candidate_id=candidate_id, research_run_id=None,
+        state=DimensionState.EVIDENCE_PRESENT_UNSCORED, pattern_state=state,
+        state_boundary=PATTERN_BOUNDARIES[state], value=None,
+        patterns=patterns_tuple, field_availability=(),
+        provenance=ContentPatternProvenance(
+            candidate_id=candidate_id, research_run_id=None,
+            evidence_ids=evidence_ids,
+            video_ids=tuple(
+                sorted({o.video_id for p in patterns_tuple for o in p.occurrences})
+            ),
+            channel_ids=(), providers=("youtube",), platforms=("youtube",),
+            source_truth_classes=("OBSERVED",), duplicate_evidence_suppressed=0,
+        ),
+        observed_video_count=4, videos_without_channel_id=0,
+        videos_with_conflicting_channel_id=0, distinct_channel_count=3,
+        outlier_observation_count=0, outlier_distinct_channel_count=0,
+        outlier_evidence_available=False,
+    )
+
+
+def test_only_an_identical_intervention_is_suppressed():
+    """Suppression fires on the canonicalized intervention, not the evidence.
+
+    Two tag spellings that canonicalize to the same value would produce
+    byte-identical production instructions, so they are one experiment. This
+    is the only thing that collapses; different values never do.
+    """
     candidate_id = uuid4()
-    evidence_id = uuid4()
+    narrow = _tag_pattern("meal plan", ["UC_A", "UC_A"])
+    broad = _tag_pattern("Meal  Plan", ["UC_A", "UC_B", "UC_C"])
+    # Same canonical intervention, different raw spelling.
+    from app.services.content_experiments import _canonical_value, _intervention_key
+
+    assert _canonical_value(narrow.value) == _canonical_value(broad.value)
+    assert _intervention_key(narrow.kind, narrow.value) == _intervention_key(
+        broad.kind, broad.value
+    )
+
+    # The weaker one arrives FIRST, so arrival order would pick it.
+    patterns = _result_with(candidate_id, (narrow, broad))
+    result = derive_content_experiments(candidate_id=candidate_id, patterns=patterns)
+
+    assert result.generated_experiment_count == 1
+    assert result.suppressed_as_equivalent_count == 1
+    retained = result.experiments[0]
+    # The published rule prefers the broader evidence, not the first arrival.
+    assert retained.variable_value == "Meal  Plan"
+    assert retained.sufficiency is EvidenceSufficiency.BROAD_PREVALENCE_ONLY
+    assert retained.evidence.distinct_channel_count == 3
+    assert [(e.kind, e.value) for e in retained.equivalent_variables] == [
+        (PatternKind.TAG, "meal plan")
+    ]
+
+
+def test_a_token_and_a_bigram_are_different_interventions_even_when_equal():
+    """The kind is part of the intervention identity, not decoration.
+
+    5B's tokenizer splits on whitespace, so a token value can never equal a
+    bigram value and the kind component of the key never discriminates in
+    the ordinary pipeline. 5C accepts a result object, though, and the key
+    must be correct for its input type rather than for one producer's
+    current tokenization: "include this word" and "include these two words
+    adjacently" stay different instructions whatever the values look like.
+    """
+    from app.services.content_patterns import (
+        ContentPattern,
+        OutlierCooccurrence,
+        PatternOccurrence,
+    )
+    from app.services.content_experiments import _intervention_key
+
+    candidate_id = uuid4()
     occurrences = tuple(
         PatternOccurrence(
-            video_id=f"V{index}",
-            channel_id=f"UC_{index}",
-            channel_state=FieldState.AVAILABLE,
-            evidence_ids=(evidence_id,),
+            video_id=f"V{index}", channel_id=f"UC_{index}",
+            channel_state=FieldState.AVAILABLE, evidence_ids=(uuid4(),),
         )
         for index in range(3)
     )
 
-    def make(kind: PatternKind, value: str) -> ContentPattern:
+    def make(kind: PatternKind) -> ContentPattern:
         return ContentPattern(
-            kind=kind, value=value, video_count=3,
+            kind=kind, value="meal plan", video_count=3,
             field_available_video_count=3, prevalence_share=1.0,
             distinct_channel_count=3, videos_without_channel_id=0,
             videos_with_conflicting_channel_id=0, top_channel_share=0.3334,
             concentration=ConcentrationState.MULTI_CREATOR,
-            occurrences=occurrences, evidence_ids=(evidence_id,),
+            occurrences=occurrences,
+            evidence_ids=tuple(
+                sorted(eid for o in occurrences for eid in o.evidence_ids)
+            ),
             cooccurrence=OutlierCooccurrence(
                 state=CooccurrenceState.OUTLIER_EVIDENCE_UNAVAILABLE,
                 outlier_video_count=0, outlier_distinct_channel_count=0,
@@ -1182,41 +1342,40 @@ def test_the_retained_representative_follows_the_rule_not_the_input_order():
             ),
         )
 
-    # Deliberately NOT in 5B's canonical order: the token sorts after the
-    # bigram under the published rule, but arrives first here.
-    token = make(PatternKind.TITLE_TOKEN, "meal")
-    bigram = make(PatternKind.TITLE_BIGRAM, "meal plan")
-    state = ContentPatternsState.PATTERNS_OBSERVED
-    patterns = ContentPatternsResult(
-        candidate_id=candidate_id, research_run_id=None,
-        state=DimensionState.EVIDENCE_PRESENT_UNSCORED, pattern_state=state,
-        state_boundary=PATTERN_BOUNDARIES[state], value=None,
-        patterns=(token, bigram), field_availability=(),
-        provenance=ContentPatternProvenance(
-            candidate_id=candidate_id, research_run_id=None,
-            evidence_ids=(evidence_id,),
-            video_ids=tuple(o.video_id for o in occurrences),
-            channel_ids=tuple(f"UC_{i}" for i in range(3)),
-            providers=("youtube",), platforms=("youtube",),
-            source_truth_classes=("OBSERVED",), duplicate_evidence_suppressed=0,
-        ),
-        observed_video_count=3, videos_without_channel_id=0,
-        videos_with_conflicting_channel_id=0, distinct_channel_count=3,
-        outlier_observation_count=0, outlier_distinct_channel_count=0,
-        outlier_evidence_available=False,
+    token = make(PatternKind.TITLE_TOKEN)
+    bigram = make(PatternKind.TITLE_BIGRAM)
+    # Identical family and identical value; only the kind differs.
+    assert token.value == bigram.value
+    assert _intervention_key(token.kind, token.value) != _intervention_key(
+        bigram.kind, bigram.value
     )
 
+    result = derive_content_experiments(
+        candidate_id=candidate_id,
+        patterns=_result_with(candidate_id, (token, bigram)),
+    )
+    assert result.generated_experiment_count == 2
+    assert result.suppressed_as_equivalent_count == 0
+    kinds = {e.variable_kind for e in result.experiments}
+    assert kinds == {PatternKind.TITLE_TOKEN, PatternKind.TITLE_BIGRAM}
+    # And they carry different production instructions.
+    instructions = {e.instructions.title_structure for e in result.experiments}
+    assert len(instructions) == 2
+    assert any("adjacent" in i for i in instructions)
+
+
+def test_different_tag_values_are_never_suppressed():
+    candidate_id = uuid4()
+    patterns = _result_with(
+        candidate_id,
+        (
+            _tag_pattern("weekly", ["UC_A", "UC_B", "UC_C"]),
+            _tag_pattern("budget", ["UC_A", "UC_B", "UC_C"]),
+        ),
+    )
     result = derive_content_experiments(candidate_id=candidate_id, patterns=patterns)
-    assert result.generated_experiment_count == 1
-    assert result.suppressed_as_equivalent_count == 1
-    retained = result.experiments[0]
-    # The published rule tie-breaks on (kind, value); the bigram wins it,
-    # even though the token arrived first.
-    assert retained.variable_kind is PatternKind.TITLE_BIGRAM
-    assert retained.variable_value == "meal plan"
-    assert [(e.kind, e.value) for e in retained.equivalent_variables] == [
-        (PatternKind.TITLE_TOKEN, "meal")
-    ]
+    assert result.generated_experiment_count == 2
+    assert result.suppressed_as_equivalent_count == 0
 
 
 def test_a_conflicting_creator_is_never_counted_as_an_attributed_creator():
@@ -1293,6 +1452,142 @@ def test_sufficiency_is_a_state_not_a_number():
     for experiment in result.experiments:
         assert isinstance(experiment.sufficiency, EvidenceSufficiency)
         assert isinstance(experiment.sufficiency.value, str)
+
+
+# ------------------------------------------------- success criterion
+
+
+def test_the_success_criterion_needs_the_publication_floor():
+    """Below the floor there is no decision — and no decision is not a stop."""
+    for count in range(MIN_TEST_PUBLICATIONS):
+        outcomes = [PublicationOutcome.AT_OR_ABOVE_BASELINE] * count
+        assert evaluate_success_criterion(outcomes) is (
+            ExperimentDecision.INSUFFICIENT_PUBLICATIONS
+        ), count
+    # Even unanimously good results cannot decide below the floor.
+    short = [PublicationOutcome.AT_OR_ABOVE_BASELINE] * (MIN_TEST_PUBLICATIONS - 1)
+    assert evaluate_success_criterion(short) is not ExperimentDecision.CONTINUE
+    assert evaluate_success_criterion(short) is not ExperimentDecision.STOP
+    # One more known outcome reaches a decision.
+    assert evaluate_success_criterion(
+        short + [PublicationOutcome.AT_OR_ABOVE_BASELINE]
+    ) is ExperimentDecision.CONTINUE
+
+
+def test_the_success_criterion_boundary_is_strictly_more_than_half():
+    above = PublicationOutcome.AT_OR_ABOVE_BASELINE
+    below = PublicationOutcome.BELOW_BASELINE
+
+    # Five known outcomes: three above is a majority, two is not.
+    assert evaluate_success_criterion([above] * 3 + [below] * 2) is (
+        ExperimentDecision.CONTINUE
+    )
+    assert evaluate_success_criterion([above] * 2 + [below] * 3) is (
+        ExperimentDecision.STOP
+    )
+    # Six known outcomes: an exact half stops.
+    assert evaluate_success_criterion([above] * 3 + [below] * 3) is (
+        ExperimentDecision.STOP
+    )
+    assert evaluate_success_criterion([above] * 4 + [below] * 2) is (
+        ExperimentDecision.CONTINUE
+    )
+    # The extremes.
+    assert evaluate_success_criterion([above] * 5) is ExperimentDecision.CONTINUE
+    assert evaluate_success_criterion([below] * 5) is ExperimentDecision.STOP
+
+
+def test_an_unknown_outcome_is_excluded_never_counted_as_below():
+    """Missing evidence must not become negative evidence."""
+    above = PublicationOutcome.AT_OR_ABOVE_BASELINE
+    below = PublicationOutcome.BELOW_BASELINE
+    unknown = PublicationOutcome.UNKNOWN
+
+    # Three above, two below, plus unknowns: the unknowns change nothing.
+    decided = [above] * 3 + [below] * 2
+    assert evaluate_success_criterion(decided) is ExperimentDecision.CONTINUE
+    assert evaluate_success_criterion(decided + [unknown] * 4) is (
+        ExperimentDecision.CONTINUE
+    )
+    # Had unknowns counted as below, this would flip to STOP; it must not.
+    assert evaluate_success_criterion(decided + [unknown] * 10) is (
+        ExperimentDecision.CONTINUE
+    )
+    # Unknowns do not count toward the floor either, so they delay a decision
+    # rather than forcing one.
+    assert evaluate_success_criterion([above] * 4 + [unknown] * 20) is (
+        ExperimentDecision.INSUFFICIENT_PUBLICATIONS
+    )
+    assert evaluate_success_criterion([unknown] * 50) is (
+        ExperimentDecision.INSUFFICIENT_PUBLICATIONS
+    )
+
+
+def test_the_success_criterion_is_order_independent():
+    """The decision is a count over a set, so permutation cannot move it."""
+    rng = random.Random(20260912)
+    pool = (
+        [PublicationOutcome.AT_OR_ABOVE_BASELINE] * 4
+        + [PublicationOutcome.BELOW_BASELINE] * 3
+        + [PublicationOutcome.UNKNOWN] * 2
+    )
+    baseline = evaluate_success_criterion(pool)
+    assert baseline is ExperimentDecision.CONTINUE
+    for _ in range(300):
+        shuffled = list(pool)
+        rng.shuffle(shuffled)
+        assert evaluate_success_criterion(shuffled) is baseline
+
+    # And for a set that stops.
+    stopping = (
+        [PublicationOutcome.AT_OR_ABOVE_BASELINE] * 2
+        + [PublicationOutcome.BELOW_BASELINE] * 4
+        + [PublicationOutcome.UNKNOWN] * 3
+    )
+    assert evaluate_success_criterion(stopping) is ExperimentDecision.STOP
+    for _ in range(300):
+        shuffled = list(stopping)
+        rng.shuffle(shuffled)
+        assert evaluate_success_criterion(shuffled) is ExperimentDecision.STOP
+
+
+def test_the_emitted_wording_and_the_implementation_agree():
+    """The rule a producer reads must be the rule the code applies."""
+    candidate_id = uuid4()
+    result = run(_spread_corpus(candidate_id), candidate_id)
+    assert result.experiments
+    text = result.experiments[0].success_criterion
+
+    # Every clause of the implementation appears in the emitted rule.
+    assert str(MIN_TEST_PUBLICATIONS) in text
+    assert "strictly more than half" in text
+    assert "an exact half stops" in text
+    assert "excluded from the count" in text
+    assert "never counted as below" in text
+    assert "yields no decision, which is not a stop" in text
+    assert "does not depend on the order" in text
+    assert "unvalidated V1 assumptions" in text
+    # And it still refuses to predict.
+    assert "not a prediction" in text
+
+    # Every experiment carries the identical rule.
+    assert {e.success_criterion for e in result.experiments} == {text}
+
+    # The wording's own worked example holds in the implementation.
+    above = PublicationOutcome.AT_OR_ABOVE_BASELINE
+    below = PublicationOutcome.BELOW_BASELINE
+    half = [above] * MIN_TEST_PUBLICATIONS + [below] * MIN_TEST_PUBLICATIONS
+    assert evaluate_success_criterion(half) is ExperimentDecision.STOP
+
+
+def test_the_decision_rule_emits_no_score_and_no_prediction():
+    for decision in ExperimentDecision:
+        assert isinstance(decision.value, str)
+        assert not any(
+            ch.isdigit() for ch in decision.value
+        ), decision
+    for outcome in PublicationOutcome:
+        assert isinstance(outcome.value, str)
 
 
 # ------------------------------------------------------- experiment ids

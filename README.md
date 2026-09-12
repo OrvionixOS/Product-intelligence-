@@ -1555,15 +1555,44 @@ apart. The 5B result's own scope is verified instead, and a mismatch is
 refused unread as `PATTERNS_SCOPE_MISMATCH` without leaking a count, a value
 or a line of lineage.
 
-#### Up to 30, never manufactured
+#### Distinctness is judged on the intervention, not the sample
 
-Two patterns in the same production family covering exactly the same observed
-videos are one experiment: the evidence cannot separate them, so shipping
-both would be a superficial variation. The runner-up is recorded as an
-equivalent variable rather than dropped. When fewer than 30 experiments
-exist, the result says why — `GenerationState` distinguishes evidence
-exhausted from cap reached, alongside observed, eligible, below-floor,
-suppressed and generated counts.
+Two patterns that happen to occur in the same videos are **not** the same
+experiment. "meal", "plan" and the phrase "meal plan" can be co-extensive in
+a corpus while remaining three independently manipulable things a producer
+can do to a title. Treating them as one would mistake observational
+co-occurrence for experimental equivalence and silently discard testable
+variables.
+
+Suppression therefore fires only when two candidates canonicalize to the
+same intervention — the same lever, the same kind and the same canonical
+value, and so byte-identical production instructions. Different token values
+stay different, a token stays different from a bigram, and different tags,
+categories and duration bands stay different. The **cap**, not equivalence,
+is what bounds output volume.
+
+When fewer than 30 experiments exist the result says why: `GenerationState`
+distinguishes evidence exhausted from cap reached, alongside observed,
+eligible, below-floor, suppressed and generated counts.
+
+#### The success criterion is an executable decision rule
+
+`evaluate_success_criterion()` implements the rule each experiment emits, and
+a test holds the wording and the implementation to each other.
+
+For each publication, record whether its creator-relative view outcome was at
+or above the producing channel's own median. A publication whose view count
+is unavailable is `UNKNOWN` and is **excluded from the count, never counted
+as below** — missing evidence must not become negative evidence, so unknowns
+delay a decision rather than forcing one. Once at least five publications
+have a known outcome, continue if strictly more than half of those known
+outcomes are at or above the baseline; an exact half stops. Fewer than five
+known outcomes yields `INSUFFICIENT_PUBLICATIONS`, which is not a stop.
+
+The decision is a count over a set, so it cannot depend on evaluation order.
+The five-publication floor and the more-than-half threshold are unvalidated
+V1 assumptions chosen by inspection; the rule is a decision procedure for a
+test, not a score, a prediction, or a statistical-power claim.
 
 #### Ordering, not scoring
 

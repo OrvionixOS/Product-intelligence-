@@ -144,8 +144,9 @@ LIMITATIONS: tuple[str, ...] = (
 class VariableFamily(str, Enum):
     """Which production lever an experiment manipulates.
 
-    Material distinctness is judged per family: two experiments that move the
-    same lever over the same observed videos are the same experiment.
+    The family groups levers for reporting and for deciding what must be held
+    constant. It is NOT an equivalence class: two variables in one family are
+    still independently manipulable and remain separate experiments.
     """
 
     TITLE = "TITLE"
@@ -241,6 +242,22 @@ _COOCCURRENCE_REPORTED: frozenset[CooccurrenceState] = frozenset(
         CooccurrenceState.ABSENT_AMONG_OUTLIERS,
     }
 )
+
+# Publication-level outcome for one variant, and the decision the criterion
+# yields. UNKNOWN exists because a publication whose view count is
+# unavailable must never be counted as a failure: missing is not below.
+class PublicationOutcome(str, Enum):
+    AT_OR_ABOVE_BASELINE = "AT_OR_ABOVE_BASELINE"
+    BELOW_BASELINE = "BELOW_BASELINE"
+    UNKNOWN = "UNKNOWN"
+
+
+class ExperimentDecision(str, Enum):
+    CONTINUE = "CONTINUE"
+    STOP = "STOP"
+    # Not a stop. Too few known outcomes to read the rule at all.
+    INSUFFICIENT_PUBLICATIONS = "INSUFFICIENT_PUBLICATIONS"
+
 
 _KIND_FAMILY: dict[PatternKind, VariableFamily] = {
     PatternKind.TITLE_TOKEN: VariableFamily.TITLE,
@@ -451,6 +468,61 @@ def _experiment_id(
     return f"exp_{digest[:12]}"
 
 
+def _canonical_value(value: str) -> str:
+    """Fold a variable value to the form the instructions would carry.
+
+    5B already normalizes pattern values, so this is defensive: 5C accepts a
+    result object a caller may build, and two spellings that would produce
+    identical production instructions must not become two experiments.
+    """
+    return " ".join(value.split()).casefold()
+
+
+def _intervention_key(kind: PatternKind, value: str) -> tuple:
+    """Identity of the actual intervention a producer would perform.
+
+    Deliberately independent of which videos were observed. Different values
+    are different interventions, and a token is a different intervention from
+    a bigram even when one contains the other, because a producer manipulates
+    them separately.
+    """
+    return (_KIND_FAMILY[kind], kind, _canonical_value(value))
+
+
+def evaluate_success_criterion(
+    outcomes: "list[PublicationOutcome] | tuple[PublicationOutcome, ...]",
+) -> ExperimentDecision:
+    """Apply the emitted success criterion to a set of publication outcomes.
+
+    The rule, stated once here and once in the emitted text, which a test
+    holds to each other:
+
+    - A publication whose creator-relative view outcome is unavailable is
+      UNKNOWN. It is EXCLUDED from the count rather than counted as below,
+      because missing evidence must never become negative evidence.
+    - With fewer than `MIN_TEST_PUBLICATIONS` known outcomes the rule yields
+      INSUFFICIENT_PUBLICATIONS. That is not a stop; it is not yet a decision.
+    - Otherwise continue when STRICTLY more than half of the known outcomes
+      are at or above the baseline, and stop otherwise. An exact half stops.
+
+    The decision is a count over a set, so it cannot depend on the order the
+    publications are evaluated in. Both the publication floor and the
+    more-than-half threshold are unvalidated V1 assumptions chosen by
+    inspection. This is a decision rule for a test: it is not a score, a
+    prediction, a statistical-power claim, or a statement about why an
+    outcome occurred.
+    """
+    known = [o for o in outcomes if o is not PublicationOutcome.UNKNOWN]
+    if len(known) < MIN_TEST_PUBLICATIONS:
+        return ExperimentDecision.INSUFFICIENT_PUBLICATIONS
+    at_or_above = sum(
+        1 for o in known if o is PublicationOutcome.AT_OR_ABOVE_BASELINE
+    )
+    if at_or_above * 2 > len(known):
+        return ExperimentDecision.CONTINUE
+    return ExperimentDecision.STOP
+
+
 def _sufficiency(pattern: ContentPattern) -> EvidenceSufficiency:
     """Classify what this pattern's evidence establishes about its base.
 
@@ -619,16 +691,25 @@ def _hypothesis(pattern: ContentPattern) -> str:
 
 
 def _success_criterion(pattern: ContentPattern) -> str:
+    """The decision rule, worded to match `evaluate_success_criterion`."""
     return (
-        f"After at least {MIN_TEST_PUBLICATIONS} publications produced under "
-        "the conditions above, continue this line of testing only if the "
-        "variants' creator-relative view outcome is at or above the "
+        "For each publication produced under the conditions above, record "
+        "whether its creator-relative view outcome was at or above the "
         "producing channel's own median for the same period, measured "
-        "against the baseline named above. Otherwise stop and record the "
-        "result. This is a decision rule chosen for this test, with an "
-        f"unvalidated V1 threshold of {MIN_TEST_PUBLICATIONS} publications. "
-        "It is not a prediction, a target, or a claim about what the variant "
-        "will achieve."
+        "against the baseline named above. A publication whose view count is "
+        "unavailable is recorded as UNKNOWN and is excluded from the count; "
+        "it is never counted as below. Once at least "
+        f"{MIN_TEST_PUBLICATIONS} publications have a known outcome, continue "
+        "this line of testing if strictly more than half of those known "
+        "outcomes are at or above the baseline, and stop otherwise; an exact "
+        f"half stops. Fewer than {MIN_TEST_PUBLICATIONS} known outcomes "
+        "yields no decision, which is not a stop. The decision is a count "
+        "over a set, so it does not depend on the order the publications are "
+        f"evaluated in. Both the {MIN_TEST_PUBLICATIONS}-publication floor "
+        "and the more-than-half threshold are unvalidated V1 assumptions "
+        "chosen by inspection. This is a decision rule for a test: it is not "
+        "a prediction, a target, or a claim about what the variant will "
+        "achieve."
     )
 
 
@@ -981,16 +1062,23 @@ def derive_content_experiments(
             features_truth_class=TruthClass.INFERRED,
         )
 
-    # Material distinctness. Two patterns in the same production family that
-    # cover exactly the same observed videos cannot be separated by this
-    # evidence, so they are one experiment. The runner-up is recorded on the
-    # retained experiment rather than dropped, and the count is reported.
-    grouped: dict[tuple[VariableFamily, tuple[str, ...]], list[ContentPattern]] = {}
+    # Material distinctness is judged on the INTERVENTION, never on the
+    # observed videos. Two patterns that happen to occur in the same videos
+    # are not the same experiment: "meal", "plan" and the phrase "meal plan"
+    # can be co-extensive in a sample while remaining three independently
+    # manipulable things a producer can do to a title. Collapsing them would
+    # mistake observational co-occurrence for experimental equivalence and
+    # would silently discard testable variables.
+    #
+    # Suppression therefore fires only when two candidates canonicalize to the
+    # SAME intervention — the same lever, the same kind, the same canonical
+    # value, and so byte-identical production instructions. The cap, not
+    # equivalence, is what bounds output volume.
+    grouped: dict[tuple, list[ContentPattern]] = {}
     for pattern in eligible:
-        videos = tuple(
-            sorted((o.video_id for o in pattern.occurrences), key=_id_sort_key)
-        )
-        grouped.setdefault((_KIND_FAMILY[pattern.kind], videos), []).append(pattern)
+        grouped.setdefault(
+            _intervention_key(pattern.kind, pattern.value), []
+        ).append(pattern)
 
     representatives: list[tuple[ContentPattern, tuple[ContentPattern, ...]]] = []
     suppressed = 0
