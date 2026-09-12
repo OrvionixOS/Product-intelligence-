@@ -317,6 +317,63 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   score is produced
 - Canonical evidence lineage and shuffled-input determinism are tested
 
+### Milestone 5B — Content pattern extraction (implemented)
+- Pure derivation over already-collected Milestone 3B public-content
+  evidence; no provider calls, network calls, persistence, endpoint, or LLM
+- Service-layer only, matching 5A's boundary; route count unchanged at 15
+- Scoped to `public_content_observation` / `purpose=CONTENT` records, and
+  only where the RECORD is `TruthClass.OBSERVED`. A payload value behind a
+  non-OBSERVED record is never read. 5A keeps `purpose=AUDIENCE` view
+  magnitudes, so the two milestones read disjoint signals
+- Candidate and research-run scoping identical to 5A: an omitted run id
+  admits only explicitly runless inline evidence
+- Versioned `content_patterns_v1`, `content_normalization_v1`,
+  `duration_band_v1`, `outlier_cooccurrence_v1`
+- Emits recurring title tokens, adjacent title bigrams, tags, categories and
+  duration bands, each with counts, distinct-creator counts, concentration
+  state, and evidence/video lineage
+- PREVALENCE and OUTLIER CO-OCCURRENCE are separate structures with separate
+  denominators and are never combined into a strength or quality measure
+- Creator concentration is always reported beside the raw count, so one
+  prolific creator cannot make a pattern read as field-wide support.
+  Co-occurrence additionally requires three independent creators before any
+  comparison is reported
+- `top_channel_share` is measured against EVERY occurrence of the pattern,
+  never the attributed subset, so unknown or conflicting creator identity can
+  only lower it. Absent and conflicting channel ids both count against a
+  dominance claim and are reported as separate counts; below the threshold
+  with identity incomplete the state is CREATOR_PARTIALLY_UNKNOWN, since
+  SINGLE_CREATOR and MULTI_CREATOR would claim a spread that is not known
+- Missing title/tags/category/duration stays UNAVAILABLE for that field,
+  shrinks that field's denominator, and is never counted as absence or zero
+- Deterministic NFKC + casefold normalization preserving Unicode letters,
+  numbers and combining marks, plus fixed duration bands; no stemming, no
+  semantic clustering, no LLM. Observed content is never deleted: accented
+  Latin, digits and non-Latin scripts all survive
+- Two OBSERVED records that disagree about the same video make that field
+  CONFLICTING — reported and excluded, never resolved by arrival order, so
+  the result is a function of the record SET rather than its sequence
+- Duplicate suppression retains the smallest evidence id per fingerprint, so
+  lineage is order-independent too; a record with no payload hash is never
+  collapsed. Derived features stay INFERRED on every path even though every
+  source record is OBSERVED
+- Milestone 5A evidence is consumed only after its candidate_id and
+  research_run_id are verified against this derivation's scope; a mismatch
+  is reported as OUTLIER_SCOPE_MISMATCH and no observation is read
+- No numeric score of any kind, no 0-100 value, no RED/YELLOW/GREEN, no POS
+  or ECS change; `value` is permanently `None` and the dimension name is
+  `preliminary_content_patterns`
+- Co-occurrence is reported as observation only. No causal or predictive
+  language is emitted, enforced by a negation-aware guard over every emitted
+  string and the full enum surface
+- Channel aggregates (`channel_subscriber_count`, `channel_view_count`,
+  `channel_video_count`) and engagement magnitudes are unreadable, enforced
+  by an AST guard that also pins the exact payload keys read
+- 30 mutations of the milestone's guards were applied and all 30 were killed,
+  including reverting the concentration denominator, folding CONFLICTING
+  channel identity into ordinary absence, declaring the dimension SCORED,
+  reverting duplicate retention to first-wins, and promoting derived features
+  to OBSERVED
+
 ### Remaining Milestone 5 scope
-- Content pattern extraction
 - 30 production-ready experiments
