@@ -4,7 +4,7 @@ Evidence-backed digital-product opportunity engine.
 
 ## Current state
 
-Milestones 0 through 4G and Milestones 5A-5B are implemented. The foundation
+Milestones 0 through 4G and Milestones 5A-5C are implemented. The foundation
 below remains the Milestone 0 contract; later sections document the completed
 research, derivation, product-specification, fit, and content-intelligence
 slices:
@@ -1523,6 +1523,69 @@ outcome data.
   never support a causal or predictive reading.
 - The corpus is whatever the Milestone 1 content queries returned, so
   relevance rests on those hypotheses exactly as it does for 4D and 4F.
+
+### Milestone 5C — production-ready content experiments
+
+Milestone 5C turns 5B's patterns into up to 30 content **experiments**. An
+experiment states what to test, what evidence makes it worth testing, how to
+produce the variant, and what result would justify continuing.
+
+It is a question posed to reality, not an answer taken from it. 5C may say
+that a pattern was observed in N videos across M creators and co-occurred
+with observations 5A scored above their own creator's baseline. It may not
+say the pattern performs better, increases views, or is a winning, viral or
+proven approach — and a negation-aware guard over every emitted string and
+the full enum surface enforces that.
+
+#### Only the outcome the evidence can actually see
+
+The single nominated measurement is the public view count of each variant
+read against the producing channel's own median — the creator-relative
+outcome 5A already works in. Click-through rate, retention, watch time,
+conversions, sales, revenue, profitability and algorithmic preference are
+not observable in public content metadata; they are never estimated and a
+dedicated guard asserts they are never named as a measurement.
+
+#### One verified gateway to 5A
+
+5C consumes the 5B result and nothing else. 5B already verifies 5A's
+`candidate_id` and `research_run_id` before reading a single observation, so
+re-verifying 5A here would put the same check in two places that could drift
+apart. The 5B result's own scope is verified instead, and a mismatch is
+refused unread as `PATTERNS_SCOPE_MISMATCH` without leaking a count, a value
+or a line of lineage.
+
+#### Up to 30, never manufactured
+
+Two patterns in the same production family covering exactly the same observed
+videos are one experiment: the evidence cannot separate them, so shipping
+both would be a superficial variation. The runner-up is recorded as an
+equivalent variable rather than dropped. When fewer than 30 experiments
+exist, the result says why — `GenerationState` distinguishes evidence
+exhausted from cap reached, alongside observed, eligible, below-floor,
+suppressed and generated counts.
+
+#### Ordering, not scoring
+
+Experiments are ordered by evidence sufficiency, then creator breadth, then
+observation count, then whether a 5A comparison exists, then a canonical
+tie-break. Every ordering input is emitted on the experiment so the order can
+be recomputed by hand. There is no score: `value` is permanently `None`, the
+dimension is `preliminary_content_experiments`, and no field carries a
+magnitude.
+
+5B's creator safeguards propagate. A pattern carried by one creator becomes
+`NARROW_CREATOR_BASE` and says so in its limitations; incomplete or
+contradictory creator identity becomes `CREATOR_IDENTITY_INCOMPLETE` and
+never claims breadth.
+
+#### V1 assumptions
+
+`MAX_EXPERIMENTS` (30), `MIN_EXPERIMENT_VIDEO_COUNT` (2),
+`MIN_CREATORS_FOR_BROAD_EVIDENCE` (3) and `MIN_TEST_PUBLICATIONS` (5) are
+unvalidated V1 definitions chosen by inspection and calibrated against no
+outcome data. `MIN_TEST_PUBLICATIONS` is a stopping rule, not a statistical
+power calculation.
 
 ### Known technical debt
 
