@@ -402,8 +402,12 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   videos. Co-extensive patterns stay distinct experiments: different token
   values, token versus bigram, and different tags/categories/duration bands
   are all independently manipulable. Suppression fires only when two
-  candidates canonicalize to the same intervention and would produce
-  byte-identical instructions; the cap bounds volume instead
+  candidates canonicalize to the same intervention; the cap bounds volume
+  instead. The survivor STATES that canonical value — title, hypothesis,
+  instructions and experiment id are all built from it — so the collapse
+  emits one intervention and one id whichever spelling became the
+  representative, while the raw spelling is kept on the evidence as lineage.
+  Case folding applies to prose only: a duration band is an enum identifier
 - The emitted success criterion is executable: `evaluate_success_criterion()`
   applies it, and a test holds the wording and the implementation together.
   Unknown publication outcomes are excluded from the count rather than
@@ -427,7 +431,7 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - No numeric score of any kind, no RED/YELLOW/GREEN, no POS or ECS change;
   `value` is permanently `None` and the dimension is
   `preliminary_content_experiments`. Derived experiments stay INFERRED
-- 39 mutations of the milestone's boundaries were applied; 38 were killed and
+- 44 mutations of the milestone's boundaries were applied; 43 were killed and
   one is a documented equivalent mutant (a deliberate redundancy over a 5B
   guarantee that is itself pinned by a test)
 

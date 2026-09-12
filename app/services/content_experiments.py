@@ -342,12 +342,18 @@ class ExperimentEvidence:
 
 @dataclass(slots=True, frozen=True)
 class EquivalentVariable:
-    """A pattern co-extensive with the retained one over the same videos.
+    """A pattern that canonicalizes to the SAME intervention as the retained one.
 
-    Recorded rather than dropped: the evidence cannot separate these
-    variables, and saying so is part of the result.
+    Equivalence here is intervention identity, never co-extensiveness: two
+    variables observed in exactly the same videos are still two experiments,
+    because a producer manipulates them separately. What lands in this record
+    is a different SPELLING of one intervention — it would produce
+    byte-identical production instructions — so only one experiment is
+    emitted. The raw spelling is kept rather than dropped, so the collapse is
+    visible in the result.
     """
 
+    # The raw observed kind and value, as 5B reported them.
     kind: PatternKind
     value: str
     video_count: int
@@ -363,6 +369,9 @@ class ContentExperiment:
 
     variable_family: VariableFamily
     variable_kind: PatternKind
+    # The CANONICAL value: the one spelling in which this intervention is
+    # stated, instructed and identified. The raw observed spelling lives on
+    # `evidence.pattern_value`.
     variable_value: str
 
     baseline_state: BaselineState
@@ -450,10 +459,11 @@ def _experiment_id(
 ) -> str:
     """Stable id for one (scope, variable) pair.
 
-    Derived from the scope and the variable alone, never from position in the
-    result. An experiment therefore keeps its id when other experiments
-    appear, disappear, or change order, which is what makes it usable as a
-    reference in anything downstream.
+    Derived from the scope and the CANONICAL variable alone, never from
+    position in the result and never from the raw spelling that happened to
+    become the representative. An experiment therefore keeps its id when
+    other experiments appear, disappear, or change order, and two spellings
+    of one intervention resolve to a single id.
     """
     material = "|".join(
         (
@@ -468,14 +478,25 @@ def _experiment_id(
     return f"exp_{digest[:12]}"
 
 
-def _canonical_value(value: str) -> str:
-    """Fold a variable value to the form the instructions would carry.
+def _canonical_value(kind: PatternKind, value: str) -> str:
+    """The single spelling in which an intervention is stated and tested.
 
-    5B already normalizes pattern values, so this is defensive: 5C accepts a
-    result object a caller may build, and two spellings that would produce
-    identical production instructions must not become two experiments.
+    This is the ONLY form that reaches the emitted experiment: the title, the
+    hypothesis, the production instructions and the experiment id are all
+    built from it. Two spellings that collapse here therefore produce
+    byte-identical instructions and one id, which is what makes suppressing
+    the duplicate honest. The raw observed spelling is kept on the evidence,
+    where it belongs as lineage.
+
+    Case folding is applied to prose values only. A duration band value is an
+    ENUM IDENTIFIER, where case is meaning: folding FIVE_TO_15_MIN would
+    corrupt it into a name no band answers to, the same way sentence-casing
+    the hypothesis once did.
     """
-    return " ".join(value.split()).casefold()
+    collapsed = " ".join(value.split())
+    if kind is PatternKind.DURATION_BAND:
+        return collapsed.upper()
+    return collapsed.casefold()
 
 
 def _intervention_key(kind: PatternKind, value: str) -> tuple:
@@ -486,7 +507,7 @@ def _intervention_key(kind: PatternKind, value: str) -> tuple:
     a bigram even when one contains the other, because a producer manipulates
     them separately.
     """
-    return (_KIND_FAMILY[kind], kind, _canonical_value(value))
+    return (_KIND_FAMILY[kind], kind, _canonical_value(kind, value))
 
 
 def evaluate_success_criterion(
@@ -676,9 +697,9 @@ def _sentence_case(text: str) -> str:
     return text[:1].upper() + text[1:] if text else text
 
 
-def _hypothesis(pattern: ContentPattern) -> str:
+def _hypothesis(pattern: ContentPattern, canonical: str) -> str:
     return (
-        f"{_sentence_case(_variable_description(pattern.kind, pattern.value))} "
+        f"{_sentence_case(_variable_description(pattern.kind, canonical))} "
         f"was observed in {pattern.video_count} of the "
         f"{pattern.field_available_video_count} sampled videos whose "
         f"corresponding field was available ({_creator_phrase(pattern)}). "
@@ -896,6 +917,14 @@ def _order_key(pattern: ContentPattern) -> tuple:
     by hand. Ordering is not scoring: no input carries a magnitude, nothing
     is combined or weighted, and the position implies nothing about expected
     performance.
+
+    The final tie-break deliberately uses the RAW value, not the canonical
+    one. Two candidates that canonicalize together would otherwise tie
+    completely and fall back to input order, which is exactly the
+    arrival-dependence this rule exists to remove. Which raw spelling becomes
+    the representative cannot leak into the output anyway, because the
+    emitted intervention and the experiment id are built from the canonical
+    value.
     """
     return (
         _SUFFICIENCY_RANK[_sufficiency(pattern)],
@@ -1072,8 +1101,9 @@ def derive_content_experiments(
     #
     # Suppression therefore fires only when two candidates canonicalize to the
     # SAME intervention — the same lever, the same kind, the same canonical
-    # value, and so byte-identical production instructions. The cap, not
-    # equivalence, is what bounds output volume.
+    # value. The retained experiment then STATES that canonical value, so the
+    # surviving instructions and id are byte-identical whichever candidate
+    # became the representative. The cap, not equivalence, bounds volume.
     grouped: dict[tuple, list[ContentPattern]] = {}
     for pattern in eligible:
         grouped.setdefault(
@@ -1099,16 +1129,19 @@ def derive_content_experiments(
     experiments: list[ContentExperiment] = []
     for rank, (pattern, equivalents) in enumerate(capped):
         baseline_state, baseline_definition = _baseline(pattern)
+        # The intervention is stated once, in its canonical spelling. The raw
+        # observed value stays on the evidence as lineage.
+        canonical = _canonical_value(pattern.kind, pattern.value)
         experiments.append(
             ContentExperiment(
                 experiment_id=_experiment_id(
-                    candidate_id, research_run_id, pattern.kind, pattern.value
+                    candidate_id, research_run_id, pattern.kind, canonical
                 ),
-                title=_title(pattern.kind, pattern.value),
-                hypothesis=_hypothesis(pattern),
+                title=_title(pattern.kind, canonical),
+                hypothesis=_hypothesis(pattern, canonical),
                 variable_family=_KIND_FAMILY[pattern.kind],
                 variable_kind=pattern.kind,
-                variable_value=pattern.value,
+                variable_value=canonical,
                 baseline_state=baseline_state,
                 baseline_definition=baseline_definition,
                 evidence=_evidence(pattern),
@@ -1120,7 +1153,7 @@ def derive_content_experiments(
                     )
                     for other in equivalents
                 ),
-                instructions=_instructions(pattern.kind, pattern.value),
+                instructions=_instructions(pattern.kind, canonical),
                 primary_measurement=PRIMARY_MEASUREMENT,
                 success_criterion=_success_criterion(pattern),
                 sufficiency=_sufficiency(pattern),

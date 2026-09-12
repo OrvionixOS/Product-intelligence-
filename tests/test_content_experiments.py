@@ -1276,7 +1276,9 @@ def test_only_an_identical_intervention_is_suppressed():
     # Same canonical intervention, different raw spelling.
     from app.services.content_experiments import _canonical_value, _intervention_key
 
-    assert _canonical_value(narrow.value) == _canonical_value(broad.value)
+    assert _canonical_value(narrow.kind, narrow.value) == _canonical_value(
+        broad.kind, broad.value
+    )
     assert _intervention_key(narrow.kind, narrow.value) == _intervention_key(
         broad.kind, broad.value
     )
@@ -1289,12 +1291,149 @@ def test_only_an_identical_intervention_is_suppressed():
     assert result.suppressed_as_equivalent_count == 1
     retained = result.experiments[0]
     # The published rule prefers the broader evidence, not the first arrival.
-    assert retained.variable_value == "Meal  Plan"
     assert retained.sufficiency is EvidenceSufficiency.BROAD_PREVALENCE_ONLY
     assert retained.evidence.distinct_channel_count == 3
+    # The intervention is stated canonically, not in whichever raw spelling
+    # became the representative.
+    assert retained.variable_value == "meal plan"
+    assert retained.instructions.tags == ("meal plan",)
+    # The raw observed spelling survives as lineage on the evidence.
+    assert retained.evidence.pattern_value == "Meal  Plan"
     assert [(e.kind, e.value) for e in retained.equivalent_variables] == [
         (PatternKind.TAG, "meal plan")
     ]
+
+
+def test_collapsed_spellings_emit_one_canonical_intervention_and_one_id():
+    """Suppression is only honest if the survivor states the canonical form.
+
+    The contract is that two candidates collapse when they would produce
+    byte-identical production instructions. An earlier version canonicalized
+    only the GROUPING KEY and then emitted the representative's raw value, so
+    the same pair could ship ("meal plan",) or ("Meal Plan",) depending on
+    which spelling carried the stronger evidence — contradicting the very
+    contract that justified dropping one of them.
+    """
+    lower = "meal plan"
+    upper = "Meal  Plan"
+    emitted = {}
+
+    # Four combinations: which spelling is stronger x which arrives first.
+    for stronger, weaker in ((lower, upper), (upper, lower)):
+        for order in ("forward", "reversed"):
+            candidate_id = UUID("11111111-1111-4111-8111-111111111111")
+            strong = _tag_pattern(stronger, ["UC_A", "UC_B", "UC_C"])
+            weak = _tag_pattern(weaker, ["UC_A", "UC_A"])
+            supplied = (weak, strong) if order == "forward" else (strong, weak)
+            result = derive_content_experiments(
+                candidate_id=candidate_id,
+                patterns=_result_with(candidate_id, supplied),
+            )
+            # (1) one intervention
+            assert result.generated_experiment_count == 1
+            assert result.suppressed_as_equivalent_count == 1
+            experiment = result.experiments[0]
+            emitted[(stronger, order)] = (
+                experiment.experiment_id,
+                experiment.variable_value,
+                experiment.title,
+                experiment.instructions,
+            )
+
+    # (2) identical canonical instructions regardless of which is stronger,
+    # (3) identical experiment id regardless of which became representative,
+    # (4) and identical under reversed input.
+    assert len(set(emitted.values())) == 1
+    experiment_id, value, title, instructions = next(iter(emitted.values()))
+    assert value == "meal plan"
+    assert instructions.tags == ("meal plan",)
+    assert "'meal plan'" in title
+    assert experiment_id == _experiment_id_for(
+        UUID("11111111-1111-4111-8111-111111111111"), PatternKind.TAG, "meal plan"
+    )
+
+
+def test_the_lineage_of_a_collapsed_intervention_is_order_independent():
+    """When co-canonical candidates tie on every ordering input, raw breaks it.
+
+    The emitted intervention is canonical either way, so the id and the
+    instructions cannot move. What CAN move is the evidence and lineage
+    attached to the survivor — and if the final tie-break used the canonical
+    value the two would tie completely, leaving `sorted` to fall back to
+    input order.
+    """
+    candidate_id = uuid4()
+    # Identical evidence strength: they differ only in raw spelling.
+    lower = _tag_pattern("meal plan", ["UC_A", "UC_B", "UC_C"])
+    upper = _tag_pattern("Meal  Plan", ["UC_A", "UC_B", "UC_C"])
+
+    def retained(patterns_tuple):
+        result = derive_content_experiments(
+            candidate_id=candidate_id,
+            patterns=_result_with(candidate_id, patterns_tuple),
+        )
+        assert result.generated_experiment_count == 1
+        assert result.suppressed_as_equivalent_count == 1
+        experiment = result.experiments[0]
+        return (
+            experiment.experiment_id,
+            experiment.variable_value,
+            experiment.evidence.pattern_value,
+            tuple((e.kind, e.value) for e in experiment.equivalent_variables),
+        )
+
+    forward = retained((lower, upper))
+    reverse = retained((upper, lower))
+    assert forward == reverse
+    # The intervention is canonical; the lineage names one fixed raw spelling.
+    assert forward[1] == "meal plan"
+    assert forward[2] in {"meal plan", "Meal  Plan"}
+
+
+def _experiment_id_for(candidate_id: UUID, kind: PatternKind, canonical: str) -> str:
+    from app.services.content_experiments import _experiment_id
+
+    return _experiment_id(candidate_id, None, kind, canonical)
+
+
+def test_a_duration_band_is_an_identifier_and_is_not_case_folded():
+    """Canonicalization must not corrupt a value whose case carries meaning."""
+    from app.services.content_experiments import _canonical_value
+
+    assert (
+        _canonical_value(PatternKind.DURATION_BAND, "FIVE_TO_15_MIN")
+        == "FIVE_TO_15_MIN"
+    )
+    # A lower-cased spelling canonicalizes UP to the real identifier, so it
+    # still resolves to a band rather than to a name no band answers to.
+    assert (
+        _canonical_value(PatternKind.DURATION_BAND, "five_to_15_min")
+        == "FIVE_TO_15_MIN"
+    )
+    assert DurationBand(
+        _canonical_value(PatternKind.DURATION_BAND, "five_to_15_min")
+    ) is DurationBand.FIVE_TO_15_MIN
+    # Prose values still fold.
+    assert _canonical_value(PatternKind.TAG, "Meal  Plan") == "meal plan"
+    assert _canonical_value(PatternKind.TITLE_TOKEN, "MEAL") == "meal"
+
+    # And the emitted band experiment keeps the identifier intact end to end.
+    candidate_id = uuid4()
+    evidence: list[EvidenceItem] = []
+    for index, channel in enumerate(("UC_A", "UC_B", "UC_C")):
+        evidence.extend(
+            video_evidence(
+                f"V{index}", candidate_id=candidate_id, channel_id=channel,
+                title=None, tags=_UNSET, category=None, duration_seconds=600,
+            )
+        )
+    result = run(evidence, candidate_id)
+    band = experiment_for(
+        result, PatternKind.DURATION_BAND, DurationBand.FIVE_TO_15_MIN.value
+    )
+    assert band is not None
+    assert band.instructions.duration_band is DurationBand.FIVE_TO_15_MIN
+    assert band.instructions.duration_seconds_range == (300, 900)
 
 
 def test_a_token_and_a_bigram_are_different_interventions_even_when_equal():

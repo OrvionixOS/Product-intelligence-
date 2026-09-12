@@ -1566,10 +1566,18 @@ variables.
 
 Suppression therefore fires only when two candidates canonicalize to the
 same intervention — the same lever, the same kind and the same canonical
-value, and so byte-identical production instructions. Different token values
-stay different, a token stays different from a bigram, and different tags,
-categories and duration bands stay different. The **cap**, not equivalence,
-is what bounds output volume.
+value. Different token values stay different, a token stays different from a
+bigram, and different tags, categories and duration bands stay different. The
+**cap**, not equivalence, is what bounds output volume.
+
+The survivor then states that canonical value: the title, hypothesis,
+production instructions and experiment id are all built from it, so two
+spellings of one intervention emit byte-identical instructions and a single
+id no matter which carried the stronger evidence or arrived first. The raw
+observed spelling is preserved on the evidence as lineage. Case folding
+applies to prose values only — a duration band is an enum identifier where
+case is meaning, so `FIVE_TO_15_MIN` is never folded into a name no band
+answers to.
 
 When fewer than 30 experiments exist the result says why: `GenerationState`
 distinguishes evidence exhausted from cap reached, alongside observed,
