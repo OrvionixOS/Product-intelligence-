@@ -375,5 +375,65 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   reverting duplicate retention to first-wins, and promoting derived features
   to OBSERVED
 
+### Milestone 5C — Production-ready content experiments (implemented)
+- Pure derivation over Milestone 5B's result; no provider calls, network
+  calls, persistence, endpoint, or LLM. Service-layer only, route count 15
+- Consumes the 5B result and NOTHING else. 5B is the single verified gateway
+  to 5A: it already checks 5A's candidate_id and research_run_id before
+  reading an observation, so re-verifying 5A here would duplicate that check
+  where the two could drift and disagree
+- The supplied 5B result's own candidate_id and research_run_id are verified
+  before anything is read; a mismatch is refused unread as
+  PATTERNS_SCOPE_MISMATCH and leaks no count, value or lineage
+- Versioned `content_experiments_v1`, `experiment_id_v1`,
+  `experiment_ordering_v1`, `experiment_template_v1`
+- Emits up to 30 experiments, each with a stable id, title, hypothesis,
+  variable, baseline definition, observed evidence with full lineage,
+  production instructions, what must be held constant, primary measurement,
+  a success criterion expressed as a decision rule, evidence sufficiency and
+  limitations
+- Experiment ids derive from (scope, variable kind, variable value) only, so
+  an experiment keeps its id when other experiments appear or disappear
+- Experiments are ORDERED by a published rule — sufficiency, creator
+  breadth, observation count, presence of a 5A comparison, then a canonical
+  tie-break — and every ordering input is emitted so the order can be
+  recomputed by hand. Ordering is not scoring
+- Material distinctness is judged on the INTERVENTION, never on the observed
+  videos. Co-extensive patterns stay distinct experiments: different token
+  values, token versus bigram, and different tags/categories/duration bands
+  are all independently manipulable. Suppression fires only when two
+  candidates canonicalize to the same intervention; the cap bounds volume
+  instead. The survivor STATES that canonical value — title, hypothesis,
+  instructions and experiment id are all built from it — so the collapse
+  emits one intervention and one id whichever spelling became the
+  representative, while the raw spelling is kept on the evidence as lineage.
+  Case folding applies to prose only: a duration band is an enum identifier
+- The emitted success criterion is executable: `evaluate_success_criterion()`
+  applies it, and a test holds the wording and the implementation together.
+  Unknown publication outcomes are excluded from the count rather than
+  counted as below, fewer than MIN_TEST_PUBLICATIONS known outcomes yields
+  no decision rather than a stop, and the decision is a count over a set so
+  it cannot depend on evaluation order
+- Never manufactures experiments to reach the cap. GenerationState says
+  whether evidence was exhausted or the cap bound the result, alongside
+  observed / eligible / below-floor / suppressed / generated counts
+- 5B's creator-concentration safeguards propagate: SINGLE_CREATOR and
+  CREATOR_CONCENTRATED become NARROW_CREATOR_BASE, CREATOR_PARTIALLY_UNKNOWN
+  and CREATOR_UNKNOWN become CREATOR_IDENTITY_INCOMPLETE, and conflicting or
+  absent creator identity is never counted as attribution
+- Co-occurrence is reported as observation only. No causal or predictive
+  language is emitted, enforced by a negation-aware guard over every emitted
+  string and the full enum surface
+- Click-through, retention, watch time, conversions, sales, revenue,
+  profitability and algorithmic preference are never named as a measurement,
+  enforced by a dedicated guard. The only nominated outcome is the public
+  creator-relative view outcome 5A already uses
+- No numeric score of any kind, no RED/YELLOW/GREEN, no POS or ECS change;
+  `value` is permanently `None` and the dimension is
+  `preliminary_content_experiments`. Derived experiments stay INFERRED
+- 44 mutations of the milestone's boundaries were applied; 43 were killed and
+  one is a documented equivalent mutant (a deliberate redundancy over a 5B
+  guarantee that is itself pinned by a test)
+
 ### Remaining Milestone 5 scope
-- 30 production-ready experiments
+- (none; publishing, scheduling and analytics are outside Milestone 5)
