@@ -926,10 +926,12 @@ Nothing below is started until this specification is approved.
 | 6 | **6F Scoring state persistence** | §10 | Schema migration for the four scoring states, including NULL score/classification |
 | 7 | **6G Classification** | U-3, 6E, 6F | Last: it needs POS, ECS and the state model to exist |
 
-**Steps 1–3 are safe to build before any formula, weight or threshold decision is
-made** — they depend only on policy constants (sample floors, freshness windows,
-cap values), each of which ships as a named versioned assumption. Steps 4–7 are
-blocked on the unresolved decisions in §13.
+**Steps 1–3 are safe to build before any POS formula, weight or classification
+threshold is chosen** — they depend only on the explicitly versioned V1 policy
+inputs required by their slices: sample floors (U-4), freshness windows (U-5),
+the `provenance_directness` mapping (U-7), and deep-pass cap values (U-6). Each
+ships as a named, versioned, explicitly uncalibrated assumption. Steps 4–7 are
+blocked on the remaining decisions in §13.
 
 ---
 
