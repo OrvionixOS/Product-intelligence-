@@ -437,3 +437,58 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 
 ### Remaining Milestone 5 scope
 - (none; publishing, scheduling and analytics are outside Milestone 5)
+
+## Milestone 6 — Step 7 / Step 8 (specified in SPEC_STEP_7_8.md)
+
+### Milestone 6A-1 — Evidence Confidence inputs and `ecs_v1` (implemented)
+- `app/services/evidence_confidence.py` derives the seven ECS components of
+  SPEC_STEP_7_8.md §6.1 from stored evidence, dimension summaries and the
+  capability outcomes orchestration already records. Pure and deterministic:
+  no provider, no network, no persistence, no LLM, no route
+- Three named, versioned, **explicitly uncalibrated** V1 policy sets, adopted
+  as policy rather than derived from data and never described as validated:
+  `sample_floors_v1` (U-4), `freshness_windows_v1` (U-5) and
+  `provenance_directness_v1` (U-7). Recalibration ships as `_v2` rather than
+  editing in place, so an earlier result stays attributable to the policy that
+  produced it. Every result carries all four version strings
+- `ecs_v1` is the unweighted mean of the counted components × 100, rounded to
+  2dp. There are no weights: no symbol implements one, and permuting which
+  component holds which score cannot move the aggregate. Each result emits its
+  component values, applicability, exclusion clause, units counted and units
+  excluded, so the number is recomputable by hand from its own output
+- The anti-inflation rule is the load-bearing one. Evidence that was expected
+  but is unavailable scores 0.0 and **stays in the denominator**; it never
+  leaves the mean. A missing timestamp, a missing sample size, an unknown
+  collection method, a degraded capability and a conflict all lower ECS, and
+  no combination of missing evidence can raise it
+- BLOCKED is not low confidence. A blocked result is `None` with a reason,
+  never `0.0`, and is tested as distinct from a genuine floor-value 0.0
+- `dimension_coverage` and `capability_health` are never excludable. A
+  capability nobody requested is excluded from the health average (a non-attempt
+  is not a failure), but if that empties the component it still counts, at 0.0:
+  no attempted collection is no evidence of health
+- Freshness reads `retrieved_at` only. `collected_at` is when this system
+  stored the record, so using it as a fallback would let storage time
+  masquerade as evidence recency; a record without `retrieved_at` scores 0.0
+- The eight legacy per-item confidence floats on `EvidenceItem`
+  (`freshness` defaulting to 1.0, `directness` to 0.5, …) are never read. A
+  test pins both halves: that the defaults still exist, and that no attribute
+  access reaches them
+- ECS measures the evidence, never the opportunity. No value-bearing field is
+  read: naming a signal type to route a record is not reading its magnitude,
+  and the guard distinguishes the two
+- Scope is verified before any record is read. Evidence belonging to another
+  candidate or another research run yields SCOPE_MISMATCH rather than being
+  silently mixed in
+- Reachability sweeps cover `EcsState`, `Applicability`, `CapabilityHealth`
+  and the component set. Two `DirectnessClass` values
+  (DETERMINISTIC_DERIVATION, INDIRECT_PROVIDER_MEDIATED) are approved policy
+  with no current production producer; a test records them as
+  declared-but-unproduced rather than letting the table look fully exercised
+- Boundary guards scan executed symbols via the AST, not raw file text. A text
+  scan reads this module's own refusals ("no POS, no weights, no
+  RED/YELLOW/GREEN") as violations, and `PROVENANCE_DIRECTNESS` contains the
+  substring "proven"
+- No POS, no `/score` activation, no deep collection, no new endpoint, no
+  schema change. Legacy `app/services/scoring.py` remains quarantined
+- 23 mutations of the milestone's boundaries were applied; all 23 were killed
