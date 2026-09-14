@@ -1,9 +1,39 @@
 # Milestone 6A-SPEC — Step 7 / Step 8 Normative Specification
 
-**Status:** PROPOSED — review rounds 1 and 2 applied. Not approved. Not implemented.
+**Status:** APPROVED — normative V1 Step 7 / Step 8 architecture. Not yet implemented.
 **Base:** `main` @ `1ad4c617fcac15908e87287f7be3f7088162bdc3`
 **Scope:** specification only. No runtime behaviour changes, no scoring, no `/score`,
 no new providers, no revival of legacy scoring constants.
+
+## Approval record
+
+- **Approved specification branch head:**
+  `07f32ec01c90614630ce1b035e7fae0834dd6657`
+  (branch `claude/milestone-6a-spec-step-7-8`, after review rounds 1 and 2).
+  Independent review complete. This document became normative at that commit;
+  the only change since is this status record, which alters no architectural
+  decision.
+- **Legacy scoring remains rejected and quarantined.** `app/services/scoring.py`
+  keeps `SCORING_STATUS = "UNAPPROVED_EXPERIMENTAL"`, stays unreachable from any
+  route, and is imported by no production module. Approving this specification
+  approves none of its weights, thresholds or kill rules (§12). `POST /score`
+  remains 410.
+- **The six §13 policy decisions remain intentionally unresolved.** They are not
+  oversights and must not be filled in by an implementer. Each must be decided
+  by a person and shipped as a **separately named, versioned, explicitly
+  uncalibrated assumption** before the implementation slice that depends on it:
+
+  | Open decision | Blocks |
+  |---|---|
+  | U-1 per-dimension POS normalization/formulas | 6D |
+  | U-2 weights and aggregation into the candidate POS scalar | 6E |
+  | U-3 classification thresholds and the ECS floor | 6G |
+  | U-4 per-capability sample floors | 6A-1 |
+  | U-5 per-capability freshness windows | 6A-1 |
+  | U-6 deep-pass cap values for `deep_pass_caps_v1` | 6B |
+
+  No implementation slice may proceed by inventing a value for the decision that
+  blocks it.
 
 Every decision below is stated as **Repository evidence → Decision → Consequence**.
 Where a product-policy choice is being made, the alternative that was rejected is
