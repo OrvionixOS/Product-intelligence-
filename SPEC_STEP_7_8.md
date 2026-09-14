@@ -1,6 +1,6 @@
 # Milestone 6A-SPEC — Step 7 / Step 8 Normative Specification
 
-**Status:** APPROVED — normative V1 Step 7 / Step 8 architecture. Not yet implemented.
+**Status:** APPROVED — normative V1 Step 7 / Step 8 architecture, with review round 3 (ECS aggregation contract, deep-pass cache semantics) applied. Not yet implemented.
 **Base:** `main` @ `1ad4c617fcac15908e87287f7be3f7088162bdc3`
 **Scope:** specification only. No runtime behaviour changes, no scoring, no `/score`,
 no new providers, no revival of legacy scoring constants.
@@ -31,9 +31,22 @@ no new providers, no revival of legacy scoring constants.
   | U-4 per-capability sample floors | 6A-1 |
   | U-5 per-capability freshness windows | 6A-1 |
   | U-6 deep-pass cap values for `deep_pass_caps_v1` | 6B |
+  | U-7 ECS component mapping values (`capability_health` ordinals, `provenance_directness` table) | 6A-1 |
 
   No implementation slice may proceed by inventing a value for the decision that
   blocks it.
+
+- **Structural blockers, now cleared.** Two contracts were missing rather than
+  merely unvalued, and an implementer would have had to invent them. Both are
+  specified in this document and neither is an open policy question:
+
+  | Blocker | Blocks | Status |
+  |---|---|---|
+  | ECS aggregation contract — normalization, enum and integer handling, aggregation rule, weights, blocked-vs-low, range, version, recomputation | 6A-1 | **Specified: §6.1 `ecs_v1`** |
+  | Deep-pass cache-depth rule — a cached shallow result may never satisfy a deeper request | 6B | **Specified: §1.1** |
+
+  6A-1 may not start until §6.1 is approved **and** U-4, U-5 and U-7 carry
+  values. 6B may not start until §1.1 is approved **and** U-6 carries values.
 
 Every decision below is stated as **Repository evidence → Decision → Consequence**.
 Where a product-policy choice is being made, the alternative that was rejected is
@@ -96,6 +109,81 @@ attributed to the collection budget that produced it, and a later budget change
 cannot silently alter what an earlier result meant. The cap VALUES remain an
 unresolved policy assumption (§13 U-6); the requirement that they be named and
 versioned is settled here.
+
+### 1.1 Deep-pass cache semantics (binding on 6B)
+
+**Repository evidence.** Two of the three caches are keyed **without any result
+limit**:
+
+- `ResearchStore.cached_listings(provider, query)` — key `(provider, query)`
+  (`app/storage/memory.py`), read at `marketplace.py:281`, while the effective
+  limit `max_listings_per_query` is resolved separately at `marketplace.py:257`.
+- `ResearchStore.cached_videos(provider, query)` — key `(provider, query)`, read
+  at `public_content.py:293`, limit `max_videos_per_query` resolved at
+  `public_content.py:264`.
+
+A cheap pass capped at N results per query therefore stores N results under a key
+that says nothing about N. A deep pass requesting M > N would hit that entry and
+receive N results **while believing it had collected deeply**. Every Step 7
+dimension built on it would then be shallow evidence wearing a deep label.
+
+`cached_metrics(provider, keyword, location, language)` is **not affected**. Its
+key is per keyword, and depth in search demand means *more keywords queried*
+(`max_keywords`, `search_demand.py:193`), not more results per keyword. A cached
+keyword metric is equally valid at any depth.
+
+**Decision — limit-aware cache identity.** Chosen over bypass/refetch because it
+is the least invasive deterministic design: it preserves the existing cache for
+same-depth reuse, spends no provider budget re-fetching what is already deep
+enough, and makes the depth question explicit rather than implicit.
+
+> **A deep pass must never treat a cached result collected under a smaller
+> effective limit as satisfying a larger deep-pass request.**
+
+Normative rules for 6B:
+
+1. **Every result-count-limited cache entry records the effective limit it was
+   collected under.** This applies to the listing and video caches. The keyword
+   cache is out of scope per the evidence above.
+2. **Reuse requires `cached_effective_limit >= requested_effective_limit`.**
+   Anything else is a **depth miss** and must be re-fetched. A depth miss is not
+   an error; it is the normal cost of going deeper.
+3. **A depth miss may never be silently downgraded** into "the cache had fewer
+   results, so fewer exist." Fewer cached results is a property of the earlier
+   budget, never an observation about the field.
+4. **Re-fetching replaces the entry** with one recording the larger limit, so a
+   later shallow request reuses it correctly and a later deeper one still misses.
+
+**Interaction with `deep_pass_caps_v1`.** The requested effective limit comes
+from the versioned cap set (§1). Both the requested limit and the cap-set version
+are recorded with the reuse decision, so any reuse is auditable against the
+budget that authorized it, and a cap change cannot retroactively legitimize
+evidence collected under the old one.
+
+**Interaction with provenance.** Every record states whether it came from a live
+deep fetch or a reused cache entry, and the effective limit it was collected
+under. A shallow-cached record may never claim deep provenance. Per §2 this is
+metadata: it cannot change a truth class (precedent: 4D-0).
+
+**Interaction with cache-hit telemetry.** `CapabilityOutcome.cached_query_count`
+already exists. 6B must distinguish a **true hit** (entry present and deep
+enough) from a **depth miss** (entry present but too shallow, so re-fetched), so
+a deep pass that looks suspiciously cheap can be diagnosed rather than trusted.
+Counting a depth miss as a hit would hide precisely the failure this rule exists
+to prevent.
+
+**Interaction with deduplication.** Step-3 and step-7 evidence overlap by
+construction: the deep pass re-observes everything the cheap pass saw, plus more.
+**6B introduces no new deduplication rule.** It relies on the existing
+fingerprint mechanism — a re-observation of the same thing produces a
+byte-identical payload, therefore an identical `raw_payload_hash`, therefore one
+record, with the smallest evidence id retained (the rule 5B settled in its
+round-2 review). Overlap is already a solved problem; a second, parallel dedup
+rule would be a way for the two to disagree.
+
+**Consequence.** 6B cannot accidentally reuse shallow cached evidence as deep
+evidence, and the one place where that could happen silently — a cache hit — now
+produces a visible depth miss and a re-fetch instead.
 
 ---
 
@@ -463,6 +551,81 @@ disappear.
    `source_quality` would require inventing a per-provider constant, which is the
    same defect in a different place.
 
+### 6.1 ECS aggregation contract (`ecs_v1`)
+
+**Repository evidence.** §6 defines seven heterogeneous inputs — a ratio, two
+per-record averages, an integer count, a decay, an enum and a rate — but no rule
+turning them into one number. Without this, 6A-1 would have to invent its own
+mappings and weights, which is the defect this whole specification exists to
+prevent.
+
+**Decision.** `ecs_v1` is fully specified below. **6A-1 implements this contract
+exactly and invents nothing.**
+
+**Step 1 — Normalize every input to a component score in [0, 1], higher = more
+confidence.** Direction is normalized here, so no component is a "badness" value
+at aggregation time.
+
+| Input | Type | Component score | Notes |
+|---|---|---|---|
+| `dimension_coverage` | ratio | identity | Already [0, 1] (§6). Never excludable |
+| `sample_adequacy` | ratio | mean over required Step 7 dimensions of `min(1, observed_sample ÷ declared_floor)` | Floors are U-4. A scoreable dimension that cannot report its sample scores **0.0** and stays in the mean |
+| `provenance_directness` | ratio | mean over contributing records of the value declared for its `(signal_type, purpose, collection_method)` triple | Table is U-7. An unrecognised or absent `collection_method` scores **0.0** — weakest provenance, never a waiver |
+| `corroboration_breadth` | **integer** | `min(1, observed_distinct_surfaces ÷ expected_surfaces_for_that_dimension)`, then mean over required dimensions | **No free parameter.** `expected_surfaces` is fixed by the dimension's own contract in §2 — D1, D2, D3, D4 and D5 are each served by one capability, D6 by all three. The denominator is read from the specification, not chosen |
+| `freshness` | decay | mean over contributing records of position in the declared window: `1.0` at collection, linear to `0.0` at the window edge, `0.0` beyond | Windows are U-5. A record with no timestamp scores **0.0** and stays in the mean |
+| `capability_health` | **enum** | declared ordinal: clean → `1.0`, partial → `0.5`, failed → `0.0` | Ordinals are U-7. Never excludable |
+| `conflict_rate` | rate | `1 − conflict_rate` | Direction inverted here so aggregation never mixes senses |
+
+**Step 2 — Aggregate as an unweighted arithmetic mean of the seven components,
+expressed 0–100 and rounded to two decimal places.**
+
+> `evidence_confidence = round(100 × mean(applicable components), 2)`
+
+**There are NO weights in `ecs_v1`.** No evidence in the repository supports
+treating any confidence component as more important than another, and inventing
+a weighting would repeat exactly the `CONFIDENCE_WEIGHTS` mistake this
+specification rejects (§12). The unweighted mean is the simplest transparent
+policy, is **explicitly uncalibrated**, and is versioned so a future weighted
+model becomes `ecs_v2` rather than a silent change of meaning.
+
+**Step 3 — Applicability, and why exclusion cannot inflate.** The top-level mean
+is taken over all seven components. Case (a) *not-applicable-by-contract*
+exclusions operate **inside** a component's own per-record average, never by
+removing the component from the top-level mean. A component leaves the top-level
+mean only when every record for it is case-(a) excluded, in which case the
+component is `NOT_APPLICABLE` and **must be reported as such**.
+`dimension_coverage` and `capability_health` can never be excluded by any path.
+
+Missing-but-expected values (case (b)) score `0.0` and remain in the mean. It is
+therefore impossible for ECS to rise because evidence went missing.
+
+**Step 4 — Blocked is not low.**
+
+| | `evidence_confidence` | Meaning |
+|---|---|---|
+| **ECS computed** | 0.00–100.00 | A measurement. A low value is a real finding about weak evidence |
+| **`ECS_BLOCKED`** | **NULL** | ECS could not be computed at all. Trigger: a `CapabilityOutcome` is absent for an attempted capability, so the collection history is unverifiable (§6) |
+
+A blocked ECS is **NULL**, never `0.0`. It may not be rendered, stored, compared
+or classified as a zero. Under §9 C-2 a blocked ECS cannot satisfy any
+classification floor, so the candidate is `SCORED_UNCLASSIFIED` or
+`INSUFFICIENT_EVIDENCE` — never classified by default.
+
+**Step 5 — Deterministic recomputation.** Every ECS result emits: each of the
+seven component scores, each component's applicability state, the denominator
+composition (which components were counted, which were `NOT_APPLICABLE` and
+under which contract clause), `ecs_v1`, and the component-mapping table version.
+ECS is a pure function of the evidence set — same set, same number, whatever
+order the records arrived in. A reader must be able to recompute the aggregate
+by hand from the emitted components alone.
+
+**Consequence.** 6A-1 has no latitude: every mapping, the aggregation rule, the
+range, the rounding and the blocked/low distinction are fixed here. What remains
+open is three tables of policy VALUES (U-4, U-5, U-7), each of which must ship
+named, versioned and labelled uncalibrated.
+
+---
+
 **Consequence.** ECS becomes computable from data the system already has, with
 no invented constants. It also becomes honest: a candidate researched through a
 failed capability gets low confidence because the capability failed, not because
@@ -700,7 +863,8 @@ the derived, versioned view of it that scoring consumes.
 | **U-3** | Classification thresholds and the ECS floor required to classify | No outcome data. Choosing numbers now repeats the v0.1 mistake (`scoring.py:30-32`) |
 | **U-4** | Per-capability sample floors (the minimums `sample_adequacy` measures against) | Each is a policy constant requiring justification |
 | **U-5** | Per-capability freshness windows | Same |
-| **U-6** | Deep-pass cap values for `deep_pass_caps_v1` | A collection-budget decision. The requirement that caps be named and versioned is settled (§1) |
+| **U-6** | Deep-pass cap values for `deep_pass_caps_v1` | A collection-budget decision. The requirement that caps be named and versioned is settled (§1), and the cache-depth rule that makes them meaningful is settled (§1.1) |
+| **U-7** | ECS component mapping values: the `capability_health` ordinals (clean/partial/failed) and the `provenance_directness` table over `(signal_type, purpose, collection_method)` | The `ecs_v1` aggregation contract is settled (§6.1); these two tables are the policy VALUES it reads. No evidence fixes them, so each is a named, versioned, uncalibrated assumption |
 
 **None of these is a technical blocker. All are product-policy choices that must
 be made by a person and recorded, not inferred by an implementer. Every one of
@@ -712,6 +876,11 @@ pass (§1); problem/product fit is not a V1 POS dimension and the architecture
 order 8 → 9 → 10 stands (§2); price evidence is contextual-only (§2 D3); the V1
 POS surface is closed at three required dimensions (§5); there is no partial
 POS (§8); a candidate-level POS scalar is required (§5 R-2).
+
+Resolved by review round 3: the ECS aggregation contract, including the decision
+that **`ecs_v1` carries no weights** (§6.1); and the deep-pass cache-depth rule
+(§1.1). Round 3 introduced exactly one new open decision, U-7, which is the table
+of values the now-fixed ECS contract reads.
 
 ---
 
@@ -745,8 +914,8 @@ Nothing below is started until this specification is approved.
 
 | Order | Milestone | Depends on | Rationale |
 |---|---|---|---|
-| 1 | **6A-1 Evidence Confidence inputs** | U-4, U-5 | Independent of every POS decision. The §6 inputs are computable from data that already exists; this is the one blocker that is purely mechanical |
-| 2 | **6B Deep collection (7a)** | U-6 | Approved in §1. Raise caps for selected candidates using the existing providers and the existing `CapabilityCaps` seam, under a versioned `deep_pass_caps_v1` |
+| 1 | **6A-1 Evidence Confidence inputs and `ecs_v1`** | §6.1, U-4, U-5, U-7 | Independent of every POS decision. The §6 inputs are computable from data that already exists, and §6.1 fixes every mapping and the aggregation rule, so the slice implements a contract rather than designing one |
+| 2 | **6B Deep collection (7a)** | §1.1, U-6 | Approved in §1. Raise caps for selected candidates using the existing providers and the existing `CapabilityCaps` seam, under a versioned `deep_pass_caps_v1`. §1.1 binds it: limit-aware cache identity, so a shallow cached result can never satisfy a deeper request |
 | 3 | **6C `DeepResearchResult` boundary object** | 6B | Uniform scope, persisted, deterministic, preliminary rank excluded |
 | 4 | **6D Per-dimension POS sub-scores** | U-1 | Exactly three dimensions, one slice each, every formula separately approved and versioned. No aggregation yet |
 | 5 | **6E Candidate POS scalar** | U-2, 6D | Aggregation of the three sub-scores. Required by R-2; blocked only on the weighting policy |
