@@ -18,7 +18,7 @@ no new providers, no revival of legacy scoring constants.
   route, and is imported by no production module. Approving this specification
   approves none of its weights, thresholds or kill rules (§12). `POST /score`
   remains 410.
-- **The six §13 policy decisions remain intentionally unresolved.** They are not
+- **The seven §13 policy decisions remain intentionally unresolved.** They are not
   oversights and must not be filled in by an implementer. Each must be decided
   by a person and shipped as a **separately named, versioned, explicitly
   uncalibrated assumption** before the implementation slice that depends on it:
@@ -31,7 +31,7 @@ no new providers, no revival of legacy scoring constants.
   | U-4 per-capability sample floors | 6A-1 |
   | U-5 per-capability freshness windows | 6A-1 |
   | U-6 deep-pass cap values for `deep_pass_caps_v1` | 6B |
-  | U-7 ECS component mapping values (`capability_health` ordinals, `provenance_directness` table) | 6A-1 |
+  | U-7 `provenance_directness` table over `(signal_type, purpose, collection_method)` | 6A-1 |
 
   No implementation slice may proceed by inventing a value for the decision that
   blocks it.
@@ -56,7 +56,7 @@ named.
 Step 7 is a genuine deep-collection pass; problem/product fit is not a V1 POS
 dimension and the architecture order 8 → 9 → 10 is preserved; price evidence is
 contextual-only; the V1 POS surface is closed at three required dimensions;
-there is no partial POS; and a candidate-level POS scalar is required. Six
+there is no partial POS; and a candidate-level POS scalar is required. Seven
 policy items remain open (§13).
 
 ---
@@ -573,7 +573,7 @@ at aggregation time.
 | `provenance_directness` | ratio | mean over contributing records of the value declared for its `(signal_type, purpose, collection_method)` triple | Table is U-7. An unrecognised or absent `collection_method` scores **0.0** — weakest provenance, never a waiver |
 | `corroboration_breadth` | **integer** | `min(1, observed_distinct_surfaces ÷ expected_surfaces_for_that_dimension)`, then mean over required dimensions | **No free parameter.** `expected_surfaces` is fixed by the dimension's own contract in §2 — D1, D2, D3, D4 and D5 are each served by one capability, D6 by all three. The denominator is read from the specification, not chosen |
 | `freshness` | decay | mean over contributing records of position in the declared window: `1.0` at collection, linear to `0.0` at the window edge, `0.0` beyond | Windows are U-5. A record with no timestamp scores **0.0** and stays in the mean |
-| `capability_health` | **enum** | declared ordinal: clean → `1.0`, partial → `0.5`, failed → `0.0` | Ordinals are U-7. Never excludable |
+| `capability_health` | **enum** | declared ordinal: clean → `1.0`, partial → `0.5`, failed → `0.0` | **Ordinals are fixed normatively here**, not an open decision: the enum has exactly three states, and an evenly spaced ordinal over an ordered three-state enum introduces no free parameter. Never excludable |
 | `conflict_rate` | rate | `1 − conflict_rate` | Direction inverted here so aggregation never mixes senses |
 
 **Step 2 — Aggregate as an unweighted arithmetic mean of the seven components,
@@ -619,10 +619,12 @@ ECS is a pure function of the evidence set — same set, same number, whatever
 order the records arrived in. A reader must be able to recompute the aggregate
 by hand from the emitted components alone.
 
-**Consequence.** 6A-1 has no latitude: every mapping, the aggregation rule, the
-range, the rounding and the blocked/low distinction are fixed here. What remains
-open is three tables of policy VALUES (U-4, U-5, U-7), each of which must ship
-named, versioned and labelled uncalibrated.
+**Consequence.** 6A-1 has no latitude: the aggregation rule, the range, the
+rounding, the blocked/low distinction, the `capability_health` ordinals and the
+`corroboration_breadth` denominator are all fixed here. Exactly three sets of
+policy VALUES remain open — the sample floors (U-4), the freshness windows (U-5)
+and the `provenance_directness` table (U-7) — each of which must ship named,
+versioned and labelled uncalibrated.
 
 ---
 
@@ -864,7 +866,7 @@ the derived, versioned view of it that scoring consumes.
 | **U-4** | Per-capability sample floors (the minimums `sample_adequacy` measures against) | Each is a policy constant requiring justification |
 | **U-5** | Per-capability freshness windows | Same |
 | **U-6** | Deep-pass cap values for `deep_pass_caps_v1` | A collection-budget decision. The requirement that caps be named and versioned is settled (§1), and the cache-depth rule that makes them meaningful is settled (§1.1) |
-| **U-7** | ECS component mapping values: the `capability_health` ordinals (clean/partial/failed) and the `provenance_directness` table over `(signal_type, purpose, collection_method)` | The `ecs_v1` aggregation contract is settled (§6.1); these two tables are the policy VALUES it reads. No evidence fixes them, so each is a named, versioned, uncalibrated assumption |
+| **U-7** | The `provenance_directness` table: a value in [0, 1] for each `(signal_type, purpose, collection_method)` triple the system emits | The `ecs_v1` aggregation contract is settled (§6.1), and every other mapping in it is fixed there. This table is the one ECS mapping the contract cannot fix for itself: it ranks provenance across heterogeneous signal types, and no evidence in the repository establishes that ranking. A named, versioned, uncalibrated assumption |
 
 **None of these is a technical blocker. All are product-policy choices that must
 be made by a person and recorded, not inferred by an implementer. Every one of
@@ -878,9 +880,11 @@ POS surface is closed at three required dimensions (§5); there is no partial
 POS (§8); a candidate-level POS scalar is required (§5 R-2).
 
 Resolved by review round 3: the ECS aggregation contract, including the decision
-that **`ecs_v1` carries no weights** (§6.1); and the deep-pass cache-depth rule
-(§1.1). Round 3 introduced exactly one new open decision, U-7, which is the table
-of values the now-fixed ECS contract reads.
+that **`ecs_v1` carries no weights**, and every component mapping inside it
+except one — the `capability_health` ordinals and the `corroboration_breadth`
+denominator are both fixed normatively in §6.1 and are not policy questions; and
+the deep-pass cache-depth rule (§1.1). Round 3 introduced exactly one new open
+decision, U-7, the single mapping table `ecs_v1` cannot fix for itself.
 
 ---
 
@@ -914,7 +918,7 @@ Nothing below is started until this specification is approved.
 
 | Order | Milestone | Depends on | Rationale |
 |---|---|---|---|
-| 1 | **6A-1 Evidence Confidence inputs and `ecs_v1`** | §6.1, U-4, U-5, U-7 | Independent of every POS decision. The §6 inputs are computable from data that already exists, and §6.1 fixes every mapping and the aggregation rule, so the slice implements a contract rather than designing one |
+| 1 | **6A-1 Evidence Confidence inputs and `ecs_v1`** | §6.1, U-4, U-5, U-7 | Independent of every POS decision. The §6 inputs are computable from data that already exists, and §6.1 fixes the aggregation rule and every mapping except the three sets of policy values it names, so the slice implements a contract rather than designing one |
 | 2 | **6B Deep collection (7a)** | §1.1, U-6 | Approved in §1. Raise caps for selected candidates using the existing providers and the existing `CapabilityCaps` seam, under a versioned `deep_pass_caps_v1`. §1.1 binds it: limit-aware cache identity, so a shallow cached result can never satisfy a deeper request |
 | 3 | **6C `DeepResearchResult` boundary object** | 6B | Uniform scope, persisted, deterministic, preliminary rank excluded |
 | 4 | **6D Per-dimension POS sub-scores** | U-1 | Exactly three dimensions, one slice each, every formula separately approved and versioned. No aggregation yet |
