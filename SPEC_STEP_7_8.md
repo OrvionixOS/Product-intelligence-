@@ -1,6 +1,6 @@
 # Milestone 6A-SPEC — Step 7 / Step 8 Normative Specification
 
-**Status:** PROPOSED — review round 1 corrections applied. Not approved. Not implemented.
+**Status:** PROPOSED — review rounds 1 and 2 applied. Not approved. Not implemented.
 **Base:** `main` @ `1ad4c617fcac15908e87287f7be3f7088162bdc3`
 **Scope:** specification only. No runtime behaviour changes, no scoring, no `/score`,
 no new providers, no revival of legacy scoring constants.
@@ -161,7 +161,7 @@ Common rules for all six:
 | Missing behaviour | Below half the listings carrying a seller → `FIELD_STRUCTURE_UNKNOWN` |
 | Conflict behaviour | Inherited from `collect_listing_views` |
 | Required / optional | **Required** |
-| May feed POS | **NO — structurally ineligible.** See §5 R-4 |
+| May feed POS | **NO — POS-ineligible in V1 under the current derivation.** See §5 R-4 |
 | May feed ECS | Coverage only |
 | Contextual only | **Yes** |
 
@@ -198,7 +198,7 @@ Common rules for all six:
 | Missing behaviour | Capability-aware MISSING, four distinguishable reasons |
 | Conflict behaviour | Identity-based counts; duplicate multiplicity preserved |
 | Required / optional | **Required** |
-| May feed POS | **NO — structurally ineligible.** See §5 R-4 |
+| May feed POS | **NO — POS-ineligible in V1 under the current derivation.** See §5 R-4 |
 | May feed ECS | Coverage only |
 | Contextual only | **Yes** |
 
@@ -371,15 +371,35 @@ property of a set of observations, not of one record.
 contract is deprecated. Evidence Confidence is recomputed from **facts the
 system already observes**, never from ratings.
 
-| ECS input | Observable source | Calculation | Range | Missing behaviour | Default |
-|---|---|---|---|---|---|
-| `dimension_coverage` | Step 7 dimension states | required dimensions in a scoreable state ÷ required dimensions | 0–1 | cannot be missing — always computable | **none** |
-| `sample_adequacy` | `sample_size` per dimension | observed sample vs. that dimension's declared minimum | 0–1 | dimension contributes `UNKNOWN`, excluded from numerator **and** denominator | **none** |
-| `provenance_directness` | `signal_type`, `purpose`, `collection_method` | declared per (signal, purpose) pair in an approved table; `official_api` ≠ `cache` ≠ unknown | 0–1 | record excluded, counted as uncovered | **none** |
-| `corroboration_breadth` | distinct `provider` / `platform` per dimension | count of independent surfaces contributing | integer | zero surfaces = dimension MISSING | **none** |
-| `freshness` | `retrieved_at` / `collected_at` vs. run time | position within a declared per-capability freshness window | 0–1 | timestamp absent → `UNKNOWN`, excluded | **none** |
-| `capability_health` | `CapabilityOutcome.status`, `provider_errors`, `failure_reason` | clean / partial / failed, already captured verbatim | enum | cannot be missing — the outcome always exists | **none** |
-| `conflict_rate` | `CONFLICTING` field states and conflict counts | conflicting observations ÷ total observations per dimension | 0–1 | no observations → dimension MISSING | **none** |
+**Two senses of "required" are in play and must not be blurred.** *Required Step 7
+dimensions* are the five the dossier must carry (D1, D2, D4, D5, D6; D3 is
+optional). *Required V1 POS dimensions* are the three that feed the score
+(`pos_search_demand`, `pos_purchase_proxy`, `pos_audience_attention`, §5).
+Evidence Confidence measures the former: coverage over the three POS dimensions
+alone would be constant, since §8 forbids a candidate POS unless all three are
+already scoreable.
+
+Each row states the metric's **applicability contract** — when it is expected at
+all — and what happens when it is expected but unavailable. Read together with
+the three cases in the Hard rules below: only case (a), *not applicable by
+contract*, leaves the denominator.
+
+| ECS input | Observable source | Calculation | Range | Applicable when (case (a) exclusion) | Expected but unavailable (case (b)) | Default |
+|---|---|---|---|---|---|---|
+| `dimension_coverage` | Step 7 dimension states | required **Step 7** dimensions in a scoreable state ÷ required Step 7 dimensions (D1, D2, D4, D5, D6 — D3 is optional and excluded from both sides) | 0–1 | Always applicable; never excluded | Cannot occur — the dimension states always exist | **none** |
+| `sample_adequacy` | `sample_size` per dimension | observed sample vs. that dimension's declared minimum (§13 U-4) | 0–1 | Applicable to every dimension that reached a scoreable state | **Stays in the denominator and scores as absent**, lowering ECS. A scoreable dimension that cannot report its sample size is less trustworthy, not exempt from the question | **none** |
+| `provenance_directness` | `signal_type`, `purpose`, `collection_method` | declared per (signal, purpose) pair in an approved table; `official_api` ≠ `cache` ≠ unknown | 0–1 | Applicable to every contributing record | **Stays in the denominator and scores as absent.** An unrecognised or absent `collection_method` is the weakest provenance, never a waiver | **none** |
+| `corroboration_breadth` | distinct `provider` / `platform` per dimension | count of independent surfaces contributing | integer | Applicable to every dimension a capability was asked to serve | Zero surfaces makes the dimension MISSING, which lowers `dimension_coverage`. It never removes the metric | **none** |
+| `freshness` | `retrieved_at` / `collected_at` vs. run time | position within a declared per-capability freshness window (§13 U-5) | 0–1 | Applicable to every contributing record | **Stays in the denominator and scores as absent.** A record with no timestamp cannot be shown to be current, so it is treated as un-evidenced recency, not as exempt | **none** |
+| `capability_health` | `CapabilityOutcome.status`, `provider_errors`, `failure_reason` | clean / partial / failed, already captured verbatim | enum | Always applicable; never excluded | Cannot occur — a `CapabilityOutcome` always exists for every attempted capability. **If one is absent, ECS is BLOCKED**, because the collection history is unverifiable | **none** |
+| `conflict_rate` | `CONFLICTING` field states and conflict counts | conflicting observations ÷ total observations per dimension | 0–1 | Applicable to dimensions with at least one observation | Zero observations makes the dimension MISSING, lowering `dimension_coverage`. The metric is not removed | **none** |
+
+**The only legitimate case (a) exclusions** are metrics that cannot apply to an
+evidence class at all — for example `marketplace_relevance` for a search-demand
+record, where no marketplace exists to be relevant to. Applicability is declared
+per (metric, evidence class) in an approved table, never decided per record at
+runtime, so "not applicable" cannot become a way to make an inconvenient metric
+disappear.
 
 **Hard rules.**
 
@@ -513,8 +533,13 @@ repository specification" (`scoring.py:30-32`).
 - **C-2.** A minimum Evidence Confidence is required to classify at all. Below
   it, the candidate is `SCORED_UNCLASSIFIED` — a score exists, a colour does
   not. The threshold value is **UNRESOLVED (U-3)**.
-- **C-3.** Incomplete required dimensions block GREEN. Whether they block
-  YELLOW is **UNRESOLVED (U-3)**.
+- **C-3.** Required-dimension completeness is **already settled upstream and is
+  not a classification question.** With no partial POS (§8), an incomplete
+  required dimension yields `INSUFFICIENT_EVIDENCE`, a NULL candidate POS and a
+  NULL classification before classification is ever reached. Classification
+  therefore only ever sees candidates whose three required dimensions were all
+  scoreable, and there is no separate question of incompleteness blocking GREEN
+  versus YELLOW. What remains unresolved is the threshold values alone (U-3).
 - **C-4.** Kill rules are **disqualifiers, not score adjustments.** A kill rule
   fires on an evidence condition, overrides the score entirely, and names
   itself in the result. No kill rule may fire on a *missing* dimension — only
@@ -554,7 +579,10 @@ State meanings:
 - `NOT_SCORED` — Step 8 has not run for this candidate/run.
 - `INSUFFICIENT_EVIDENCE` — Step 8 ran; **at least one** of the three required
   POS dimensions was not scoreable. No candidate score, no colour. Computable
-  sub-scores and `excluded_dimensions` are still retained (§8).
+  sub-scores and `excluded_dimensions` are still retained (§8), and **Evidence
+  Confidence is still computed and stored** where its own inputs allow: knowing
+  how good the evidence was is most useful precisely when it was not good
+  enough to score.
 - `SCORED_UNCLASSIFIED` — all three required dimensions were scoreable and a
   candidate POS exists, but ECS is below the classification floor. Score exists,
   colour does not.
@@ -617,12 +645,12 @@ the derived, versioned view of it that scoring consumes.
 
 | Artifact | Disposition |
 |---|---|
-| `WEIGHTS` (7 POS weights) | **REJECTED.** Never promoted. Four of the seven dimensions are structurally ineligible or unbuildable |
+| `WEIGHTS` (7 POS weights) | **REJECTED.** Never promoted. Four of the seven dimensions are POS-ineligible in V1 or unbuildable before step 10 |
 | `CONFIDENCE_WEIGHTS` (8 ECS weights) | **REJECTED.** Replaced by §6 |
 | 8 `EvidenceItem` confidence fields | **DEPRECATED.** Retained on the model, never read by Step 8, never populated |
 | `classify` thresholds (50 / 70 / 70) | **REJECTED.** Mechanics respecified in §9; numbers unresolved |
 | `apply_kill_rules` — `NO_PROVEN_DEMAND_OR_PURCHASE_SIGNAL` | **REJECTED.** Cannot distinguish observed zero from defaulted zero (violates C-4) |
-| `apply_kill_rules` — `NO_IDENTIFIABLE_DISTRIBUTION_ROUTE` | **REJECTED.** Reads `buyer_reach < 20`; no such magnitude exists or may exist (R-4) |
+| `apply_kill_rules` — `NO_IDENTIFIABLE_DISTRIBUTION_ROUTE` | **REJECTED for V1.** Reads `buyer_reach < 20`; no approved V1 buyer-reach magnitude exists for it to read, so the rule is invalid for V1. A future version would need a separately approved magnitude (R-4) |
 | `ScoreDimensions` (7 fields) | **REJECTED as the scoring contract.** Replaced by §4 |
 | `ScoreDimensions.price_strength` | **REJECTED.** No implementation; 4B refuses price recommendation and WTP |
 | `ScoreDimensions.problem_product_fit` | **REJECTED for V1.** Unbuildable before step 10; the architecture order 8 → 9 → 10 is preserved rather than reordered |
