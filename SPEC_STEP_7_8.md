@@ -1,13 +1,20 @@
 # Milestone 6A-SPEC — Step 7 / Step 8 Normative Specification
 
-**Status:** PROPOSED. Not approved. Not implemented.
+**Status:** PROPOSED — review round 1 corrections applied. Not approved. Not implemented.
 **Base:** `main` @ `1ad4c617fcac15908e87287f7be3f7088162bdc3`
 **Scope:** specification only. No runtime behaviour changes, no scoring, no `/score`,
 no new providers, no revival of legacy scoring constants.
 
 Every decision below is stated as **Repository evidence → Decision → Consequence**.
-Where a product-policy choice is being made, it is labelled POLICY and the
-alternative that was rejected is named.
+Where a product-policy choice is being made, the alternative that was rejected is
+named.
+
+**Review round 1 settled six questions**, marked inline as "review decision":
+Step 7 is a genuine deep-collection pass; problem/product fit is not a V1 POS
+dimension and the architecture order 8 → 9 → 10 is preserved; price evidence is
+contextual-only; the V1 POS surface is closed at three required dimensions;
+there is no partial POS; and a candidate-level POS scalar is required. Six
+policy items remain open (§13).
 
 ---
 
@@ -46,12 +53,19 @@ dimensions already exist as implemented derivations (4A, 4B, 4D, 4E, 4F and the
 uniformly scoped, persisted boundary object (§11). This is the single most
 important finding carried from the 6A-0 audit into this specification.
 
-**POLICY — rejected alternative.** Step 7 could have been defined as
-derivation-only over step-3 evidence, which is what the repository does today.
-Rejected: the same evidence cannot answer a question at two different depths,
-and a "deep" stage that collects nothing makes the step-3/step-7 distinction
-vacuous. If the reviewer prefers derivation-only, §14 U-1 records the
-consequence.
+**APPROVED (review decision, was U-1).** Step 7 is a genuine second
+deep-collection pass, not derivation-only. The alternative — deriving again over
+step-3 evidence, which is what the repository does today — is rejected: the same
+evidence cannot answer a question at two depths, and a "deep" stage that collects
+nothing makes the step-3/step-7 distinction vacuous.
+
+**Caps are explicitly versioned.** The deep pass declares a named, versioned cap
+set (`deep_pass_caps_v1`) supplying the eight `CapabilityCaps` fields. The
+version is recorded on every `DeepResearchResult`, so any result can be
+attributed to the collection budget that produced it, and a later budget change
+cannot silently alter what an earlier result meant. The cap VALUES remain an
+unresolved policy assumption (§13 U-6); the requirement that they be named and
+versioned is settled here.
 
 ---
 
@@ -129,9 +143,9 @@ Common rules for all six:
 | Missing behaviour | `MISSING` vs `UNKNOWN` preserved; never 0 |
 | Conflict behaviour | Per-currency bands cannot conflict across currencies by construction |
 | Required / optional | **Optional** — a candidate with no priced comparables is still scoreable |
-| May feed POS | **UNRESOLVED (§13 U-3)** — see the `price_strength` rejection in §12 |
+| May feed POS | **NO — contextual only in V1 (review decision, was U-3).** Observed asking prices, without transaction prices or willingness-to-pay, cannot establish opportunity strength: a high asking price may signal margin or merely ambition, and a low one may signal commodity pressure or efficient production. The evidence is real and is retained in the dossier; the interpretation is not available |
 | May feed ECS | Sample adequacy only |
-| Contextual only | Currently yes, pending U-3 |
+| Contextual only | **Yes** |
 
 ### D4 — `deep_competition_structure`
 
@@ -190,10 +204,14 @@ Common rules for all six:
 
 ### Dimensions deliberately NOT specified
 
-- **Problem/product fit.** Cannot be a Step 7 dimension. 4G consumes a 4C
-  specification (`routes.py:2388`), and 4C is step 10. At step 7 the product does
-  not exist. **Consequence:** the legacy `problem_product_fit` weight is
-  unbuildable before step 10 (§13 U-2).
+- **Problem/product fit.** Cannot be a Step 7 dimension, and is **not a V1 POS
+  dimension** (review decision, was U-2). 4G consumes a 4C specification
+  (`routes.py:2388`), and 4C is step 10; at step 7 the product does not exist.
+  **The canonical architecture order is preserved: Step 8 scoring → Step 9
+  classification → Step 10 product generation.** Scoring does not move after
+  product generation. 4C and 4G remain post-score and must not influence V1 POS
+  or V1 ECS by any path. **Consequence:** the legacy `problem_product_fit`
+  weight is rejected for V1 (§12), not deferred.
 - **Price strength.** No implementation exists and 4B explicitly refuses a price
   recommendation or willingness-to-pay. Rejected in §12.
 - **Buyer reach as a magnitude.** 4D refuses to estimate buyer counts. Only the
@@ -209,9 +227,9 @@ Common rules for all six:
 | Raw marketplace evidence | **Step 7 required input** |
 | Raw public-content evidence | **Step 7 required input** |
 | 4A purchase evidence | **Step 7 required input; POS eligible as a proxy** |
-| 4B price evidence | **Step 7 optional input; POS eligibility UNRESOLVED (U-3)** |
-| 4D buyer reach | **Step 7 required input; contextual only — POS ineligible** |
-| 4E competition opportunity | **Step 7 required input; contextual only — POS ineligible** |
+| 4B price evidence | **Step 7 optional input; contextual only — POS ineligible in V1** |
+| 4D buyer reach | **Step 7 required input; contextual only — POS ineligible in V1 (R-4)** |
+| 4E competition opportunity | **Step 7 required input; contextual only — POS ineligible in V1 (R-4)** |
 | 4F audience attention | **Step 7 required input; POS eligible as attention** |
 | Preliminary search-demand 0–100 | **Preliminary-selection only. FORBIDDEN from Step 8** |
 | Preliminary audience-interest 0–100 | **Preliminary-selection only. FORBIDDEN from Step 8** |
@@ -282,17 +300,31 @@ that are "never ranked" and has "no ordering over the patterns", enforced by AST
 guards. 4D caps relevance at INFERRED permanently. No outcome data exists
 anywhere in the repository against which any weight could be calibrated.
 
-**Decision.** The POS contract specifies **structure now, numbers later.**
+**Decision.** The POS contract specifies **structure now, numbers later**, over a
+**closed V1 dimension surface of exactly three dimensions.**
+
+### V1 POS input surface (closed)
 
 | POS dimension | Meaning | Source | Formula | Normalization | Range | Missing | UNKNOWN allowed | Zero legitimate? | Direction | Version |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `pos_search_demand` | Observed search interest | D1 | **UNRESOLVED** | **UNRESOLVED** | 0–100 | dimension UNKNOWN | Yes | **Yes** — an observed zero-volume keyword is a real measurement | higher = more | `pos_search_demand_v1` (unassigned) |
-| `pos_purchase_proxy` | Observable evidence that comparable things sell | D2 | **UNRESOLVED** | **UNRESOLVED** | 0–100 | dimension UNKNOWN | Yes | **Yes** — zero observed review proxies is a real observation | higher = more | unassigned |
-| `pos_audience_attention` | Observed public attention | D5 | **UNRESOLVED** | **UNRESOLVED** | 0–100 | dimension UNKNOWN | Yes | **Yes** — an observed zero-view video is a real measurement | higher = more | unassigned |
-| `pos_price_opportunity` | — | D3 | **UNRESOLVED (U-3)** | — | — | — | — | — | — | — |
-| Competition | — | D4 | **INELIGIBLE (R-4)** | — | — | — | — | — | — | — |
-| Channel reach | — | D6 | **INELIGIBLE (R-4)** | — | — | — | — | — | — | — |
-| Problem/product fit | — | 4G | **INELIGIBLE at step 8 (U-2)** | — | — | — | — | — | — | — |
+| `pos_search_demand` | Observed search interest | D1 | **UNRESOLVED** | **UNRESOLVED** | 0–100 | see §8 — blocks candidate POS | Yes, at dimension level | **Yes** — an observed zero-volume keyword is a real measurement | higher = more | `pos_search_demand_v1` (unassigned) |
+| `pos_purchase_proxy` | Observable evidence that comparable things sell | D2 | **UNRESOLVED** | **UNRESOLVED** | 0–100 | see §8 — blocks candidate POS | Yes, at dimension level | **Yes** — zero observed review proxies is a real observation | higher = more | unassigned |
+| `pos_audience_attention` | Observed public attention | D5 | **UNRESOLVED** | **UNRESOLVED** | 0–100 | see §8 — blocks candidate POS | Yes, at dimension level | **Yes** — an observed zero-view video is a real measurement | higher = more | unassigned |
+
+**All three are REQUIRED.** The V1 surface is closed: no other dimension
+contributes a POS magnitude.
+
+### Retained as contextual dossier evidence, not score magnitudes
+
+| Evidence | Source | Why contextual in V1 |
+|---|---|---|
+| Competition structure | D4 | The V1 derivation emits opposed readings with no ordering over its patterns |
+| Channel reach | D6 | The V1 derivation's relevance is capped at INFERRED and it refuses magnitude |
+| Price evidence | D3 | Asking prices without transaction prices or willingness-to-pay cannot establish opportunity strength (review decision, was U-3) |
+| Problem/product fit | 4G | Post-score by architecture; step 10 output cannot feed step 8 (review decision, was U-2) |
+
+These are carried in the Step 7 dossier, surfaced beside a score, and never
+inside one.
 
 **No formula is specified in this milestone.** Inventing one to fill the table
 is explicitly forbidden by this milestone's own brief and by `scoring.py:35-37`.
@@ -301,17 +333,24 @@ Five rules govern any future formula:
 
 - **R-1 — Named and versioned.** Every dimension formula carries its own version
   string, independently approved.
-- **R-2 — No composite without approved weights.** Until weights are approved
-  against evidence, Step 8 emits per-dimension sub-scores and **no single POS
-  scalar**. A candidate-level POS is itself gated on U-4.
+- **R-2 — A candidate-level POS scalar is required; its weights are not yet
+  chosen.** V1 architecture requires **one deterministic candidate-level POS
+  scalar, plus the three retained per-dimension sub-scores**, because Step 9
+  consumes a candidate-level opportunity judgment and cannot classify a vector.
+  The scalar's existence is settled here. Its **aggregation rule and weights
+  remain unresolved** (§13 U-2) and must be a named, versioned policy assumption
+  until outcome data supports calibration. Sub-scores are always retained
+  alongside the scalar so the scalar can be recomputed and audited by hand.
 - **R-3 — Distribution over point estimates.** Where a distribution is available
   (D1, D5), the formula reads the distribution, not a bare median. 4F exists
   because a total or median is the statistic one outlier corrupts.
-- **R-4 — Structural ineligibility is permanent.** D4 and D6 may never contribute
-  a POS magnitude. D4 deliberately has no ordering over its patterns; D6's
-  relevance is permanently INFERRED. Giving either a number would require
-  inventing the ordering both milestones deliberately refused. They are
-  **contextual**: reportable alongside a score, never inside it.
+- **R-4 — V1 ineligibility is a property of the current derivations, not a
+  permanent ban.** The current V1 D4/D6 derivations are POS-ineligible. Making
+  either scoreable in a future scoring version requires a separately approved
+  observable magnitude, formula, truth contract, and tests. Existing
+  qualitative/state derivations may never be numerically ordered retroactively:
+  a future scoreable competition or reach signal must be a NEW, separately
+  versioned derivation, not a number attached to the existing patterns.
 - **R-5 — Proxies stay labelled.** `pos_purchase_proxy` is a proxy and must be
   surfaced as one wherever it appears.
 
@@ -344,11 +383,27 @@ system already observes**, never from ratings.
 
 **Hard rules.**
 
-1. **No defaults are permitted anywhere in Evidence Confidence.** An unavailable
-   input is `UNKNOWN` and is excluded from both numerator and denominator; it
-   never takes a value. Precedent: 5C's `evaluate_success_criterion`, where an
-   UNKNOWN publication outcome is excluded rather than counted as below, and
-   fewer than the floor yields no decision rather than a stop.
+1. **No defaults are permitted anywhere in Evidence Confidence.** No ECS input
+   may ever take an invented constant — not `0.5`, not `1.0`, not a
+   per-provider assumption. Precedent: 5C's `evaluate_success_criterion`, where
+   an UNKNOWN outcome is excluded rather than counted as below.
+
+   **Missingness resolves into exactly three cases, and only the first is
+   excluded from the denominator:**
+
+   | Case | Meaning | Treatment |
+   |---|---|---|
+   | **(a) Not applicable by contract** | The metric does not apply to this evidence class at all — e.g. `marketplace_relevance` for a search-demand record, where no marketplace exists to be relevant to | **Excluded from the denominator.** Its absence is not a deficiency |
+   | **(b) Expected but unavailable** | The metric applies and should have had a value, but does not — missing `retrieved_at`, absent sample size, unreported capability health | **Stays in the denominator and scores as absent**, lowering coverage/confidence. Where the metric's own contract declares it mandatory, it **blocks ECS entirely** rather than lowering it |
+   | **(c) Opportunity observation UNKNOWN** | The underlying measurement of the opportunity is unknown — no search volume returned, view count unavailable | **Lowers ECS coverage; never converted into a POS value of any kind**, negative or otherwise. Per §8 it makes the POS dimension UNKNOWN, which under §8 blocks the candidate POS |
+
+   **Anti-inflation rule.** Case (b) must never be silently reclassified as case
+   (a). Missing freshness, provenance, sample information or capability health
+   are case (b): they remain in the denominator, so ECS **falls**. It must be
+   impossible for ECS to rise merely because a metric vanished. Every ECS result
+   therefore reports its denominator composition — which metrics were counted,
+   which were excluded as not-applicable, and under which contract clause — so
+   that an inflated score is visible rather than inferred.
 2. **ECS measures the evidence, not the opportunity.** No ECS input may read the
    *magnitude* of any observation.
 3. **Low coverage lowers ECS; it never lowers POS.** See §7.
@@ -422,11 +477,26 @@ collapses to zero.
 An absent measurement is not a zero and never enters POS. This is the single rule
 every milestone from 3C onward has enforced, and Step 8 inherits it unchanged.
 
-**Partial scoring.** POS may be computed over the subset of required dimensions
-that are scoreable, **provided** the result records which dimensions were
-excluded and why. POS must remain unavailable when **no** required dimension is
-scoreable. The minimum number of required dimensions for a partial POS is
-**UNRESOLVED (U-5)**.
+**No partial scoring (review decision, was U-5).** All three required V1 POS
+dimensions must be scoreable for a candidate-level POS to exist. If any required
+dimension is `MISSING`, or `UNKNOWN` beyond what its own derivation rules permit,
+then for that candidate and run:
+
+- `scoring_state` = `INSUFFICIENT_EVIDENCE`
+- candidate-level `opportunity_score` = **NULL**
+- `classification` = **NULL**
+
+The per-dimension sub-scores that WERE computable are still retained and
+reported, together with `excluded_dimensions` naming each unavailable dimension
+and its `missing_reason`. A candidate POS is never computed over a varying
+subset of dimensions.
+
+**Why.** A composite over a varying subset is not comparable between candidates:
+two candidates with the same printed score could rest on different dimensions,
+and the number would silently mean something different for each. The legacy
+`weighted_opportunity_score` did exactly this — it renormalized over whichever
+weights happened to be present (`scoring.py:88-104`) — which is how a candidate
+missing most of its evidence could score 80.
 
 ---
 
@@ -442,9 +512,9 @@ repository specification" (`scoring.py:30-32`).
   A high score on thin evidence must not present as GREEN.
 - **C-2.** A minimum Evidence Confidence is required to classify at all. Below
   it, the candidate is `SCORED_UNCLASSIFIED` — a score exists, a colour does
-  not. The threshold value is **UNRESOLVED (U-6)**.
+  not. The threshold value is **UNRESOLVED (U-3)**.
 - **C-3.** Incomplete required dimensions block GREEN. Whether they block
-  YELLOW is **UNRESOLVED (U-6)**.
+  YELLOW is **UNRESOLVED (U-3)**.
 - **C-4.** Kill rules are **disqualifiers, not score adjustments.** A kill rule
   fires on an evidence condition, overrides the score entirely, and names
   itself in the result. No kill rule may fire on a *missing* dimension — only
@@ -482,10 +552,12 @@ pos_version, ecs_version, threshold_set_version : text
 State meanings:
 
 - `NOT_SCORED` — Step 8 has not run for this candidate/run.
-- `INSUFFICIENT_EVIDENCE` — Step 8 ran; too few required dimensions were
-  scoreable. No score, no colour.
-- `SCORED_UNCLASSIFIED` — POS computed; ECS below the classification floor, or
-  required dimensions incomplete. Score exists, colour does not.
+- `INSUFFICIENT_EVIDENCE` — Step 8 ran; **at least one** of the three required
+  POS dimensions was not scoreable. No candidate score, no colour. Computable
+  sub-scores and `excluded_dimensions` are still retained (§8).
+- `SCORED_UNCLASSIFIED` — all three required dimensions were scoreable and a
+  candidate POS exists, but ECS is below the classification floor. Score exists,
+  colour does not.
 - `CLASSIFIED` — POS, ECS and a colour all exist.
 
 **Consequence.** "Missing values remain missing" becomes representable in
@@ -553,7 +625,7 @@ the derived, versioned view of it that scoring consumes.
 | `apply_kill_rules` — `NO_IDENTIFIABLE_DISTRIBUTION_ROUTE` | **REJECTED.** Reads `buyer_reach < 20`; no such magnitude exists or may exist (R-4) |
 | `ScoreDimensions` (7 fields) | **REJECTED as the scoring contract.** Replaced by §4 |
 | `ScoreDimensions.price_strength` | **REJECTED.** No implementation; 4B refuses price recommendation and WTP |
-| `ScoreDimensions.problem_product_fit` | **REJECTED at step 8.** Unbuildable before step 10 (U-2) |
+| `ScoreDimensions.problem_product_fit` | **REJECTED for V1.** Unbuildable before step 10; the architecture order 8 → 9 → 10 is preserved rather than reordered |
 | `score_opportunity`, `weighted_opportunity_score`, `evidence_confidence` | **RETAINED as quarantined library code**, unreachable, per `scoring.py:20-24` |
 | `SCORING_STATUS` quarantine marker | **RETAINED.** Working as intended |
 | `score_versions` table | **RETAINED, contract superseded** by §10. No migration here |
@@ -565,17 +637,23 @@ the derived, versioned view of it that scoring consumes.
 
 | # | Decision required | Why it cannot be settled from the repository |
 |---|---|---|
-| **U-1** | Does Step 7 collect new evidence (7a), or derive only? | §1 proposes collection; the repository currently does derivation-only. This is a cost/depth policy call, not a technical one |
-| **U-2** | Does POS include problem/product fit — and if so, does Step 8 move after step 10? | 4G needs a 4C spec. Either POS drops the dimension, or scoring happens after product generation, reordering the architecture |
-| **U-3** | Is price evidence POS-eligible at all? | Asking prices without transaction data may indicate opportunity or merely supply. 4B refuses to interpret them |
-| **U-4** | Does Step 8 emit a single POS scalar, or only per-dimension sub-scores? | No approved weights and no outcome data. R-2 defaults to sub-scores only |
-| **U-5** | Minimum required dimensions for a partial POS | A policy floor; no evidence justifies a specific count |
-| **U-6** | Numeric thresholds: ECS floor to classify, and GREEN/YELLOW cutoffs | No outcome data exists. Choosing numbers now repeats the v0.1 mistake |
-| **U-7** | Per-capability freshness windows and per-dimension minimum samples | Needed by §6; each is a policy constant requiring justification |
-| **U-8** | Do the deep-pass caps differ per capability, and by how much? | A budget decision |
+| **U-1** | Exact per-dimension POS normalization and formulas for `pos_search_demand`, `pos_purchase_proxy`, `pos_audience_attention` | No outcome data exists against which any normalization could be calibrated. Each must be a named, versioned policy assumption until it can be |
+| **U-2** | Weights and aggregation rule combining the three sub-scores into the candidate POS scalar | R-2 settles that a scalar is required; no evidence supports any particular weighting. Versioned policy assumption until calibrated |
+| **U-3** | Classification thresholds and the ECS floor required to classify | No outcome data. Choosing numbers now repeats the v0.1 mistake (`scoring.py:30-32`) |
+| **U-4** | Per-capability sample floors (the minimums `sample_adequacy` measures against) | Each is a policy constant requiring justification |
+| **U-5** | Per-capability freshness windows | Same |
+| **U-6** | Deep-pass cap values for `deep_pass_caps_v1` | A collection-budget decision. The requirement that caps be named and versioned is settled (§1) |
 
 **None of these is a technical blocker. All are product-policy choices that must
-be made by a person and recorded, not inferred by an implementer.**
+be made by a person and recorded, not inferred by an implementer. Every one of
+them must ship as a NAMED, VERSIONED policy assumption, explicitly labelled
+uncalibrated, unless and until outcome evidence supports calibration.**
+
+Resolved by this review and no longer open: Step 7 is a genuine deep-collection
+pass (§1); problem/product fit is not a V1 POS dimension and the architecture
+order 8 → 9 → 10 stands (§2); price evidence is contextual-only (§2 D3); the V1
+POS surface is closed at three required dimensions (§5); there is no partial
+POS (§8); a candidate-level POS scalar is required (§5 R-2).
 
 ---
 
@@ -609,15 +687,18 @@ Nothing below is started until this specification is approved.
 
 | Order | Milestone | Depends on | Rationale |
 |---|---|---|---|
-| 1 | **6A-1 Evidence Confidence inputs** | U-7 | Independent of every POS decision. The §6 inputs are computable from data that already exists; this is the one blocker that is purely mechanical |
-| 2 | **6B Deep collection (7a)** | U-1, U-8 | Raise caps for selected candidates using existing providers and the existing `CapabilityCaps` seam |
-| 3 | **6C `DeepResearchResult` boundary object** | 6B | Uniform scope, persisted, deterministic, rank excluded |
-| 4 | **6D Per-dimension POS formulas** | U-2, U-3, U-4, U-5 | One dimension per slice, each separately approved and versioned |
-| 5 | **6E Scoring state persistence** | §10 | Schema migration for the four scoring states |
-| 6 | **6F Classification** | U-6 | Last, because it needs both POS and ECS to exist |
+| 1 | **6A-1 Evidence Confidence inputs** | U-4, U-5 | Independent of every POS decision. The §6 inputs are computable from data that already exists; this is the one blocker that is purely mechanical |
+| 2 | **6B Deep collection (7a)** | U-6 | Approved in §1. Raise caps for selected candidates using the existing providers and the existing `CapabilityCaps` seam, under a versioned `deep_pass_caps_v1` |
+| 3 | **6C `DeepResearchResult` boundary object** | 6B | Uniform scope, persisted, deterministic, preliminary rank excluded |
+| 4 | **6D Per-dimension POS sub-scores** | U-1 | Exactly three dimensions, one slice each, every formula separately approved and versioned. No aggregation yet |
+| 5 | **6E Candidate POS scalar** | U-2, 6D | Aggregation of the three sub-scores. Required by R-2; blocked only on the weighting policy |
+| 6 | **6F Scoring state persistence** | §10 | Schema migration for the four scoring states, including NULL score/classification |
+| 7 | **6G Classification** | U-3, 6E, 6F | Last: it needs POS, ECS and the state model to exist |
 
-**Steps 1–3 are safe to build before any threshold decision is made.** Steps 4–6
-are blocked on the unresolved product decisions in §13.
+**Steps 1–3 are safe to build before any formula, weight or threshold decision is
+made** — they depend only on policy constants (sample floors, freshness windows,
+cap values), each of which ships as a named versioned assumption. Steps 4–7 are
+blocked on the unresolved decisions in §13.
 
 ---
 
