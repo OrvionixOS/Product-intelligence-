@@ -1,0 +1,71 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Product Intelligence</title>
+<style>
+  :root{--bg:#fbfbfa;--fg:#1a1a18;--mut:#6b6b66;--line:#e2e2dd;--card:#fff;
+        --red:#a8322a;--yellow:#8a6510;--green:#2c6e3f;--none:#6b6b66}
+  @media (prefers-color-scheme:dark){:root{--bg:#161614;--fg:#eceae4;--mut:#9a9890;
+        --line:#2e2c28;--card:#1e1c1a;--red:#e0827a;--yellow:#d9ae5a;--green:#7fc194;--none:#9a9890}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.55 ui-sans-serif,system-ui,sans-serif}
+  .wrap{max-width:1040px;margin:0 auto;padding:24px 16px 72px}
+  h1{font-size:19px;margin:0 0 2px} h2{font-size:15px;margin:26px 0 10px}
+  .sub{color:var(--mut);margin:0 0 20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px;margin:10px 0}
+  label{display:block;font-weight:600;margin:10px 0 4px}
+  input,select{width:100%;padding:8px 10px;border:1px solid var(--line);border-radius:6px;
+        background:var(--bg);color:var(--fg);font:inherit}
+  button{padding:8px 14px;border:1px solid var(--line);border-radius:6px;background:var(--fg);
+        color:var(--bg);font:inherit;font-weight:600;cursor:pointer}
+  button.ghost{background:transparent;color:var(--fg)}
+  button[disabled]{opacity:.45;cursor:not-allowed}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px}
+  .mut{color:var(--mut)} .mono{font-family:ui-monospace,monospace;font-size:12px}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;border:1px solid currentColor;
+        font-size:11px;font-weight:700;letter-spacing:.04em}
+  .RED{color:var(--red)} .YELLOW{color:var(--yellow)} .GREEN{color:var(--green)} .NONE{color:var(--none)}
+  .num{font-size:24px;font-weight:700}
+  .absent{font-size:15px;font-weight:600;color:var(--mut);font-style:italic}
+  table{width:100%;border-collapse:collapse;font-size:13px} td,th{text-align:left;padding:5px 8px;
+        border-bottom:1px solid var(--line);vertical-align:top} th{color:var(--mut);font-weight:600}
+  details{margin-top:8px} summary{cursor:pointer;color:var(--mut);font-size:13px}
+  .note{border-left:3px solid var(--line);padding:4px 0 4px 10px;color:var(--mut);font-size:12.5px;margin:6px 0}
+  .err{color:var(--red)} .ok{color:var(--green)}
+  .step{display:flex;gap:8px;align-items:baseline;margin-bottom:6px}
+  .step b{font-size:12px;color:var(--mut);min-width:54px}
+  .scroll{overflow-x:auto}
+</style>
+<div class="wrap">
+  <h1>Product Intelligence</h1>
+  <p class="sub">Evidence-backed digital-product opportunities. Every number here was produced by a
+     named, versioned formula. Uncalibrated V1 policy throughout — nothing on this page is a forecast.</p>
+
+  <div class="card">
+    <div class="step"><b>Step 1–2</b><div>Seed a niche and generate candidates.</div></div>
+    <label for="seed">Niche, keyword, problem or audience</label>
+    <input id="seed" value="sourdough baking" placeholder="e.g. sourdough baking">
+    <div class="grid" style="margin-top:8px">
+      <div><label for="p_search">Search demand provider</label>
+        <select id="p_search"><option value="">(not requested)</option></select></div>
+      <div><label for="p_market">Marketplace provider</label>
+        <select id="p_market"><option value="">(not requested)</option></select></div>
+      <div><label for="p_content">Public content provider</label>
+        <select id="p_content"><option value="">(not requested)</option></select></div>
+    </div>
+    <div class="note">A provider left unrequested is reported as such. Its dimensions become MISSING
+      with a stated reason — never zero.</div>
+    <div class="row" style="margin-top:10px">
+      <button id="go_discover">Generate candidates</button>
+      <button id="go_prelim" class="ghost" disabled>Run preliminary research</button>
+    </div>
+    <div id="msg_discover" class="mut" style="margin-top:8px"></div>
+  </div>
+
+  <div id="sec_candidates" hidden></div>
+  <div id="sec_deep" hidden></div>
+  <div id="sec_detail" hidden></div>
+</div>
+<script src="display.js"></script>
+<script src="app.js"></script>
