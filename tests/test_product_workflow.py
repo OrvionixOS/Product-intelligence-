@@ -676,3 +676,180 @@ def test_the_route_surface_is_exactly_the_pinned_one():
     from tests.route_surface import assert_route_surface_unchanged
 
     assert_route_surface_unchanged(app)
+
+
+# ===================================================================
+# Milestone 7C — the complete flow, exactly as the interface drives it
+# ===================================================================
+
+
+def _flow_client(monkeypatch):
+    """The real ASGI app with deterministic providers registered by name,
+    reached through the same endpoints the page calls."""
+    from fastapi.testclient import TestClient
+
+    from app.api import routes
+    from app.main import app
+
+    class AnyListings(dict):
+        """Answers every query, so real candidate queries are exercised."""
+
+        def get(self, key, default=None):
+            return TEN_LISTINGS["sourdough guide"]
+
+    class AnyVideos(dict):
+        def get(self, key, default=None):
+            return TEN_VIDEOS["sourdough guide"]
+
+    monkeypatch.setitem(routes.SEARCH_DEMAND_PROVIDERS, "fake", FakeSearchDemand)
+    monkeypatch.setitem(
+        routes.MARKETPLACE_PROVIDERS, "fake", lambda: FakeMarketplace(AnyListings())
+    )
+    monkeypatch.setitem(
+        routes.PUBLIC_CONTENT_PROVIDERS, "fake", lambda: FakeContent(AnyVideos())
+    )
+    return TestClient(app)
+
+
+FAKES = {
+    "search_demand_provider": "fake",
+    "marketplace": "fake",
+    "public_content_provider": "fake",
+}
+
+
+def test_the_complete_product_flow_from_a_seed_keyword(monkeypatch):
+    """Every stage the interface offers, in order, against the real API."""
+    client = _flow_client(monkeypatch)
+
+    discovered = client.post("/candidates/discover", json={"seed_keyword": "artisan bread"})
+    assert discovered.status_code == 200
+    run_id = discovered.json()["research_run_id"]
+    candidates = discovered.json()["candidates"][:3]
+    assert candidates, "discovery needs no credentials"
+
+    prelim = client.post(
+        "/research/preliminary", json={"research_run_id": run_id, **FAKES}
+    )
+    assert prelim.status_code == 200
+    assert prelim.json()["capabilities"], "the UI renders these to explain missing evidence"
+
+    deep = client.post(
+        "/workflow/deep-research",
+        json={
+            "research_run_id": run_id,
+            "candidate_ids": [c["id"] for c in candidates],
+            **FAKES,
+        },
+    )
+    assert deep.status_code == 200, deep.text
+    body = deep.json()
+    assert len(body["candidates"]) == 3
+    scored = body["candidates"][0]
+    assert scored["scoring"]["scoring_state"] in ("CLASSIFIED", "SCORED_UNCLASSIFIED")
+    assert scored["scoring"]["opportunity_score"] is not None
+    assert scored["scoring"]["evidence_confidence"] is not None
+    assert scored["may_generate_product"] is True
+    # Every field the comparison view reads is present.
+    for field in ("candidate_id", "scoring", "context", "dimensions", "unscoreable_reason"):
+        assert field in scored, field
+    assert len(scored["scoring"]["sub_scores"]) == 3
+
+    spec = client.post(
+        "/product/specification",
+        json={"research_run_id": run_id, "candidate_id": scored["candidate_id"]},
+    )
+    assert spec.status_code == 200, spec.text
+    assert spec.json()["specification"]["state"] == "GENERATED"
+    assert spec.json()["product_job_fit"]["pattern"]
+    assert spec.json()["scoring"]["opportunity_score"] == (
+        scored["scoring"]["opportunity_score"]
+    )
+
+    plan = client.post(
+        "/workflow/content-plan",
+        json={"research_run_id": run_id, "candidate_id": scored["candidate_id"]},
+    )
+    assert plan.status_code == 200, plan.text
+    assert plan.json()["experiments_state"]
+
+    state = client.get(f"/workflow/runs/{run_id}/candidates/{scored['candidate_id']}")
+    assert state.status_code == 200
+    assert state.json()["stage"] == "SCORED"
+
+
+def test_with_no_providers_the_flow_stays_honest(monkeypatch):
+    """The no-credential path: missing stays missing, nothing becomes zero,
+    the gates close, and the reason is reported."""
+    client = _flow_client(monkeypatch)
+    discovered = client.post(
+        "/candidates/discover", json={"seed_keyword": "artisan bread"}
+    )
+    run_id = discovered.json()["research_run_id"]
+    candidate_id = discovered.json()["candidates"][0]["id"]
+
+    deep = client.post(
+        "/workflow/deep-research",
+        json={"research_run_id": run_id, "candidate_ids": [candidate_id]},
+    )
+    assert deep.status_code == 200
+    scored = deep.json()["candidates"][0]
+    s = scored["scoring"]
+
+    # No score, and it is absent rather than zero.
+    assert s["scoring_state"] == "INSUFFICIENT_EVIDENCE"
+    assert s["opportunity_score"] is None
+    assert s["classification"] is None
+    assert scored["may_generate_product"] is False
+    assert scored["unscoreable_reason"] == "candidate_could_not_be_scored"
+    # Every required dimension is MISSING with a stated reason, never zero.
+    for dimension in scored["dimensions"]:
+        if dimension["state"] == "MISSING":
+            assert dimension["missing_reason"], dimension["dimension_name"]
+            assert dimension["sample_size"] is None
+    # The capability outcomes say why, which is what the page renders.
+    reported = {c["capability"]: c["status"] for c in deep.json()["capabilities"]}
+    assert set(reported) == {"search_demand", "marketplace", "public_content"}
+    assert all(status == "NOT_REQUESTED" for status in reported.values())
+
+    # Both gates are closed, and each says it is a gate and not a verdict.
+    for path in ("/product/specification", "/workflow/content-plan"):
+        refused = client.post(
+            path, json={"research_run_id": run_id, "candidate_id": candidate_id}
+        )
+        assert refused.status_code == 409, path
+        assert refused.json()["detail"]["reason"] == "candidate_could_not_be_scored"
+        assert "not a low score" in refused.json()["detail"]["message"]
+
+
+def test_a_candidate_from_another_run_is_refused_by_every_stage(monkeypatch):
+    """The defect the interface could previously walk into: acting on a
+    candidate that belonged to a previous run."""
+    client = _flow_client(monkeypatch)
+    first = client.post("/candidates/discover", json={"seed_keyword": "artisan bread"})
+    second = client.post("/candidates/discover", json={"seed_keyword": "watercolour"})
+    stale_candidate = first.json()["candidates"][0]["id"]
+    new_run = second.json()["research_run_id"]
+
+    for path in ("/product/specification", "/workflow/content-plan"):
+        refused = client.post(
+            path, json={"research_run_id": new_run, "candidate_id": stale_candidate}
+        )
+        assert refused.status_code in (404, 409), path
+
+    mismatched = client.post(
+        "/workflow/deep-research",
+        json={"research_run_id": new_run, "candidate_ids": [stale_candidate], **FAKES},
+    )
+    assert mismatched.status_code == 404
+    assert "not part of research run" in mismatched.json()["detail"]
+
+
+def test_a_validation_error_reports_the_field_that_was_wrong(monkeypatch):
+    """The shape the page must render readably."""
+    client = _flow_client(monkeypatch)
+    bad = client.post("/candidates/discover", json={"seed_keyword": "x"})
+    assert bad.status_code == 422
+    detail = bad.json()["detail"]
+    assert isinstance(detail, list)
+    assert detail[0]["loc"][-1] == "seed_keyword"

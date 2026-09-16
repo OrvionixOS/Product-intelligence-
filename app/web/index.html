@@ -1,6 +1,7 @@
 <!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:,">
 <title>Product Intelligence</title>
 <style>
   :root{--bg:#fbfbfa;--fg:#1a1a18;--mut:#6b6b66;--line:#e2e2dd;--card:#fff;
@@ -36,11 +37,25 @@
   .step{display:flex;gap:8px;align-items:baseline;margin-bottom:6px}
   .step b{font-size:12px;color:var(--mut);min-width:54px}
   .scroll{overflow-x:auto}
+  .stgbar{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:0 0 16px;font-size:12px}
+  .stg{padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--mut)}
+  .stg.now{border-color:currentColor;color:var(--fg);font-weight:700}
+  .stg.done{color:var(--green);border-color:currentColor}
+  .stgsep{color:var(--mut)}
+  .spin{display:inline-block;width:9px;height:9px;border:2px solid var(--line);
+        border-top-color:var(--fg);border-radius:50%;animation:sp .7s linear infinite;
+        vertical-align:-1px;margin-right:5px}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .sortbtn{background:none;border:0;color:var(--mut);font:inherit;font-weight:600;
+        padding:0;cursor:pointer}
+  .sortbtn:hover{color:var(--fg)}
 </style>
 <div class="wrap">
   <h1>Product Intelligence</h1>
   <p class="sub">Evidence-backed digital-product opportunities. Every number here was produced by a
      named, versioned formula. Uncalibrated V1 policy throughout — nothing on this page is a forecast.</p>
+  <div id="stagebar" class="stgbar"></div>
+  <div id="restored" style="margin:-8px 0 14px"></div>
 
   <div class="card">
     <div class="step"><b>Step 1–2</b><div>Seed a niche and generate candidates.</div></div>
@@ -65,6 +80,7 @@
 
   <div id="sec_candidates" hidden></div>
   <div id="sec_deep" hidden></div>
+  <div id="sec_compare" hidden></div>
   <div id="sec_detail" hidden></div>
 </div>
 <script src="display.js"></script>
