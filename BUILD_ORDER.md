@@ -741,3 +741,38 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   that is precisely how a missing measurement becomes a zero
 - Node-backed tests skip cleanly where Node is absent; the structural guards
   always run
+
+### Milestone 7C — Integration validation and usability (implemented)
+- The app was run locally and the real `/app` interface driven in a real
+  browser (the pre-installed Chromium), through the real endpoints, in both
+  the no-credential path and a fully scored path with deterministic providers.
+  Five defects were found that way and fixed
+- **Stale run state (the serious one).** Starting a new discovery left the
+  previous run's scores, evidence detail and action buttons on screen and
+  clickable. Acting on one sent the NEW run id with an OLD candidate id: the
+  server refused correctly, but only after stale results had been shown as
+  current. A new run now clears every section and the workflow cache before
+  the new run id is adopted
+- **Validation errors rendered as raw JSON.** FastAPI returns `detail` as a
+  LIST for a 422, and the handler stringified it. All three shapes the API can
+  return — a string, the gate's `{reason, message}`, and the 422 list — are now
+  formatted for a person
+- **Capability outcomes were never rendered.** They are the single most common
+  reason a whole dimension is MISSING, above all when a provider has no
+  credentials, and they were invisible. Both passes now surface them with an
+  explanation that says the dimensions stay MISSING and nothing was assumed
+- **A favicon 404 on every page load**, now avoided entirely
+- The provider names are in one named constant rather than scattered inline
+- **Candidate comparison.** Title, state, POS, ECS, colour, all three
+  sub-scores, excluded dimensions, price context and channel context.
+  Sorting is over one already-approved field with no new composite and no
+  recommendation, and a candidate with no measurement sorts **last in both
+  directions**, because an absent score is not a low one
+- **Run and candidate survive reload** via `localStorage` — two ids, no
+  account, no server session, no database. A saved run the server no longer
+  has is cleared rather than shown, and every access is guarded so private
+  mode or a quota error cannot break the page
+- Stage indicator across the five stages, progress and error states on every
+  long action, and a closed gate explained as a gate rather than a verdict
+- Regression tests for all five defects, plus ASGI end-to-end tests covering
+  the complete flow, the honest no-credential path, and cross-run refusal

@@ -237,3 +237,211 @@ def test_the_interface_is_a_single_page_with_no_build_step():
     ]
     html = INDEX.read_text(encoding="utf-8")
     assert "http://" not in html and "https://" not in html, "no external assets"
+
+
+# ===================================================================
+# Milestone 7C — regressions for defects found by driving the real UI
+# ===================================================================
+
+
+@needs_node
+def test_a_validation_error_is_readable_rather_than_raw_json():
+    """DEFECT: FastAPI returns `detail` as a LIST for a 422, and the handler
+    stringified it, putting a raw JSON blob in front of a person."""
+    rendered = run_display(
+        "D.formatApiError([{loc:['body','seed_keyword'],"
+        "msg:'String should have at least 2 characters'}])"
+    )
+    assert "seed_keyword" in rendered
+    assert "at least 2 characters" in rendered
+    assert "{" not in rendered and "[" not in rendered
+
+
+@needs_node
+def test_every_error_shape_the_api_can_return_is_handled():
+    """A plain string, the gate's {reason, message}, and a 422 list."""
+    assert run_display("D.formatApiError('research run not found')") == (
+        "research run not found"
+    )
+    assert "could not be scored" in run_display(
+        "D.formatApiError({reason:'x', message:'candidate could not be scored'})"
+    )
+    assert run_display("D.formatApiError(null, 'Bad Request')") == "Bad Request"
+
+
+@needs_node
+def test_a_capability_that_could_not_be_constructed_explains_itself():
+    """DEFECT: capability outcomes were never rendered, so with no credentials
+    every dimension read MISSING with nothing on screen saying why."""
+    note = run_display(
+        "D.capabilityNote({status:'PROVIDER_FAILED',"
+        "failure_reason:'MissingCredentialsError: ETSY_API_KEY is not set'})"
+    )
+    assert "ETSY_API_KEY" in note
+    assert "MISSING" in note
+    assert "nothing was assumed" in note
+
+    not_requested = run_display("D.capabilityNote({status:'NOT_REQUESTED'})")
+    assert "no provider was selected" in not_requested
+    assert "rather than zero" in not_requested
+
+
+@needs_node
+def test_a_comparison_row_preserves_null_rather_than_substituting_a_number():
+    row = run_display(
+        "JSON.stringify(D.comparisonRow({candidate_id:'c1',"
+        "scoring:{scoring_state:'INSUFFICIENT_EVIDENCE',opportunity_score:null,"
+        "evidence_confidence:71.2,classification:null,"
+        "sub_scores:[{name:'pos_search_demand',value:74.4},"
+        "{name:'pos_purchase_proxy',value:null}],"
+        "excluded_dimensions:[{dimension:'deep_audience_attention'}]},"
+        "context:[]}, 'A candidate'))"
+    )
+    import json as _json
+
+    parsed = _json.loads(row)
+    assert parsed["opportunity_score"] is None
+    assert parsed["pos_purchase_proxy"] is None
+    assert parsed["pos_audience_attention"] is None, "absent sub-score stays absent"
+    assert parsed["pos_search_demand"] == 74.4
+    assert parsed["evidence_confidence"] == 71.2
+    assert parsed["excluded"] == ["deep_audience_attention"]
+
+
+@needs_node
+def test_an_unmeasured_candidate_sorts_last_in_both_directions():
+    """An absent score is not a low one, so it never sorts as though it were."""
+    rows = (
+        "[{title:'none',opportunity_score:null},"
+        "{title:'low',opportunity_score:10},"
+        "{title:'high',opportunity_score:90}]"
+    )
+    desc = run_display(
+        f"D.sortRows({rows},'opportunity_score',true).map(r=>r.title).join(',')"
+    )
+    asc = run_display(
+        f"D.sortRows({rows},'opportunity_score',false).map(r=>r.title).join(',')"
+    )
+    assert desc == "high,low,none"
+    assert asc == "low,high,none"
+
+
+def test_sorting_is_over_an_approved_field_and_adds_no_composite():
+    """Negation-aware: the module may NAME a composite in order to refuse it.
+
+    A bare substring scan fires on the comment that says "and no
+    recommendation", which is the opposite of the thing being guarded against.
+    """
+    import re
+
+    source = DISPLAY.read_text(encoding="utf-8")
+    for invented in ("weight", "rank", "recommend", "composite"):
+        for match in re.finditer(invented, source, re.IGNORECASE):
+            window = source[max(0, match.start() - 60) : match.start()]
+            assert re.search(
+                r"\b(no|not|never|nor)\b", window, re.IGNORECASE
+            ), f"{invented}: {source[match.start() - 60 : match.end() + 30]!r}"
+    # And the sort really is a comparison of one field, with no arithmetic.
+    sort_body = source.split("function sortRows(")[1].split("\n  }")[0]
+    for arithmetic in ("*", "+", "/"):
+        assert arithmetic not in sort_body, arithmetic
+
+
+@needs_node
+def test_the_stage_indicator_covers_the_whole_pipeline_in_order():
+    stages = run_display("D.STAGES.join(',')")
+    assert stages == "DISCOVERED,RESEARCHED,SCORED,PRODUCT,CONTENT"
+    assert run_display("String(D.stageIndex('SCORED'))") == "2"
+    assert run_display("String(D.stageIndex('nonsense'))") == "-1"
+
+
+def test_a_new_run_clears_every_trace_of_the_previous_one():
+    """DEFECT: starting a new discovery left the previous run's scores,
+    evidence and action buttons on screen and clickable. Acting on one sent
+    the NEW run id with an OLD candidate id; the server refused, but only
+    after stale results had been shown as current."""
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "function resetRunState()" in source
+    # Every section the previous run populated is cleared.
+    for section in ("sec_deep", "sec_compare", "sec_detail"):
+        assert section in source.split("function resetRunState()")[1][:400], section
+    # And it runs on a new discovery, before the new run is adopted.
+    discover = source.split('$("go_discover").onclick')[1]
+    assert discover.index("resetRunState()") < discover.index("state.runId = out.research_run_id")
+
+
+def test_the_selected_candidate_is_tracked_so_state_cannot_drift():
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "state.selectedId = candidateId" in source
+    # renderDetail refuses a candidate the current run does not know.
+    assert "if (!c) return;" in source
+
+
+def test_run_state_is_persisted_and_stale_state_is_cleared():
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "localStorage" in source
+    assert "pi.workflow.v1" in source
+    # A saved run that no longer exists on the server is forgotten, not shown.
+    assert "function forget()" in source
+    assert "forget();" in source
+    assert "no longer on the server" in source
+    # No account, no server session, no database was introduced for this.
+    for forbidden in ("cookie", "sessionStorage", "/login", "auth"):
+        assert forbidden not in source.lower(), forbidden
+
+
+def test_persistence_failure_never_breaks_the_page():
+    """Private mode and quota limits make localStorage throw."""
+    source = APP_JS.read_text(encoding="utf-8")
+    remember = source.split("function remember()")[1].split("function recall()")[0]
+    assert "try {" in remember and "catch" in remember
+    recall = source.split("function recall()")[1].split("function forget()")[0]
+    assert "try {" in recall and "catch" in recall
+
+
+def test_the_page_requests_no_favicon():
+    """DEFECT: every page load logged a 404 for /favicon.ico."""
+    html = INDEX.read_text(encoding="utf-8")
+    assert 'rel="icon" href="data:,"' in html
+
+
+def test_loading_and_error_states_exist_for_every_long_action():
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "function busy(" in source and "function fail(" in source
+    # Anchored on each handler's own opening, not on the first mention of its
+    # name: slicing from the name catches a declaration elsewhere in the file.
+    handlers = {
+        "discover": '$("go_discover").onclick = async () => {',
+        "preliminary": '$("go_prelim").onclick = async () => {',
+        "deep research": "async function runDeep() {",
+        "product": "async function runSpec(",
+        "content": "async function runContent(",
+    }
+    for name, anchor in handlers.items():
+        assert source.count(anchor) == 1, name
+        body = source.split(anchor)[1][:1600]
+        assert "busy(" in body, f"{name} shows no progress"
+        assert "fail(" in body, f"{name} does not handle failure"
+    # A closed gate is explained as a gate, not as a verdict.
+    assert "closed gate, not a verdict" in source
+
+
+def test_capability_outcomes_are_rendered_wherever_they_are_returned():
+    source = APP_JS.read_text(encoding="utf-8")
+    assert "function renderCapabilities(" in source
+    # Both the cheap pass and the deep pass surface them.
+    assert source.count("renderCapabilities(") >= 3
+
+
+def test_the_comparison_view_shows_every_required_column():
+    source = APP_JS.read_text(encoding="utf-8")
+    compare = source.split("function renderCompare()")[1]
+    for column in (
+        "opportunity_score", "evidence_confidence", "classification",
+        "pos_search_demand", "pos_purchase_proxy", "pos_audience_attention",
+        "excluded", "price_context", "channel_context",
+    ):
+        assert column in compare, column
+    # Nulls are rendered as absences, and the proxy keeps its label.
+    assert "not measured" in compare
+    assert "proxy" in compare and "attention" in compare
