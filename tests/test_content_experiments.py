@@ -69,6 +69,8 @@ from app.services.faceless_content_intelligence import (
 )
 from app.services.preliminary_dimensions import DimensionState
 
+from tests.route_surface import assert_route_surface_unchanged
+
 MODULE_PATH = Path("app/services/content_experiments.py")
 PUBLIC_CONTENT = "public_content"
 NOT_REQUESTED = "capability_not_requested"
@@ -2318,8 +2320,8 @@ def test_no_endpoint_was_added_and_score_remains_gone():
 
     from app.main import app
 
-    paths = {route.path for route in app.routes if hasattr(route, "methods")}
-    assert len(paths) == 15
+
+    assert_route_surface_unchanged(app)
     assert TestClient(app).post("/score", json={}).status_code == 410
 
 

@@ -64,6 +64,8 @@ from tests.test_orchestration import (
     make_candidate,
 )
 
+from tests.route_surface import assert_openapi_surface_unchanged, assert_route_surface_unchanged
+
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 MODULE_PATH = Path("app/services/competition_opportunity.py")
 
@@ -1037,6 +1039,7 @@ async def test_marketplace_not_requested_is_distinct_from_a_failure():
 def test_response_exposes_competition_opportunity_additively():
     from app.main import app
 
+
     schema = app.openapi()
     response = schema["components"]["schemas"]["PreliminaryResearchResponse"]
     assert "competition_opportunity" in response["properties"]
@@ -1045,7 +1048,7 @@ def test_response_exposes_competition_opportunity_additively():
         assert field in response["properties"]
         assert field in response["required"]
     # No endpoint was added.
-    assert len(schema["paths"]) == 10
+    assert_openapi_surface_unchanged(schema)
 
 
 def test_score_endpoint_remains_gone():
@@ -1059,7 +1062,7 @@ def test_score_endpoint_remains_gone():
 def test_route_count_is_unchanged():
     from app.main import app
 
-    assert len({route.path for route in app.routes}) == 15
+    assert_route_surface_unchanged(app)
 
 
 def test_no_scoring_vocabulary_is_introduced():

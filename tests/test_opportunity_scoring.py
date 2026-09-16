@@ -82,6 +82,8 @@ from tests.test_deep_research import (
     video_evidence,
 )
 
+from tests.route_surface import assert_route_surface_unchanged
+
 POS_MODULE = Path("app/services/pos_dimensions.py")
 SCORING_MODULE = Path("app/services/opportunity_scoring.py")
 SCHEMA = Path("schema.sql")
@@ -923,15 +925,26 @@ def test_score_endpoint_remains_quarantined():
     from fastapi.testclient import TestClient
 
     from app.main import app
+
     from app.services.scoring import SCORING_STATUS
 
-    paths = {route.path for route in app.routes if hasattr(route, "methods")}
-    assert len(paths) == 15
+    assert_route_surface_unchanged(app)
     assert TestClient(app).post("/score", json={}).status_code == 410
     assert SCORING_STATUS == "UNAPPROVED_EXPERIMENTAL"
 
 
-def test_the_new_scoring_is_not_wired_into_any_route():
+def test_the_scoring_is_reached_through_the_workflow_not_a_scoring_route():
+    """Milestone 7A wired this in. Scoring happens inside the deep-research
+    workflow, so no route computes a score on its own and `/score` stays 410."""
+    from tests.route_surface import EXPECTED_ROUTE_PATHS
+
     routes = Path("app/api/routes.py").read_text(encoding="utf-8")
-    for name in ("opportunity_scoring", "pos_dimensions", "score_candidate"):
-        assert name not in routes, name
+    # The workflow owns the composition; routes never call the scorer directly.
+    assert "score_candidate" not in routes
+    assert "compute_pos_sub_scores" not in routes
+    assert "run_deep_research_and_score" in routes
+    # No endpoint exists whose job is to score something handed to it.
+    assert "/score" in EXPECTED_ROUTE_PATHS
+    assert not any(
+        path.endswith("/score") and path != "/score" for path in EXPECTED_ROUTE_PATHS
+    )

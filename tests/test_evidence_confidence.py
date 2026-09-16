@@ -61,6 +61,8 @@ from app.services.evidence_confidence import (
     record_capability,
 )
 
+from tests.route_surface import assert_route_surface_unchanged
+
 MODULE_PATH = Path("app/services/evidence_confidence.py")
 NOW = datetime(2026, 9, 14, tzinfo=UTC)
 
@@ -1607,17 +1609,22 @@ def test_no_endpoint_was_added_and_score_remains_gone():
 
     from app.main import app
 
-    paths = {route.path for route in app.routes if hasattr(route, "methods")}
-    assert len(paths) == 15
+
+    assert_route_surface_unchanged(app)
     assert TestClient(app).post("/score", json={}).status_code == 410
 
 
-def test_6a1_is_not_wired_into_any_route():
-    import app.api.routes as routes
+def test_6a1_is_reachable_only_through_the_scored_workflow():
+    """Milestone 7A wired this in. It is reached through the workflow, which
+    computes it per candidate, and never through a route of its own."""
+    from tests.route_surface import EXPECTED_ROUTE_PATHS
 
-    assert "evidence_confidence" not in Path(routes.__file__).read_text(
-        encoding="utf-8"
-    )
+    routes_source = Path("app/api/routes.py").read_text(encoding="utf-8")
+    # No endpoint computes Evidence Confidence directly.
+    assert not any("confidence" in path for path in EXPECTED_ROUTE_PATHS)
+    # It reaches the surface only as a reported value on a scoring record.
+    assert "compute_evidence_confidence" not in routes_source
+    assert "evidence_confidence" in routes_source
 
 
 def test_legacy_scoring_remains_quarantined():

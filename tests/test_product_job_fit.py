@@ -60,6 +60,8 @@ from app.services.product_specification import (
 )
 from app.services.purchase_evidence import extract_purchase_evidence
 
+from tests.route_surface import assert_openapi_surface_unchanged, assert_route_surface_unchanged
+
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 MODULE_PATH = Path("app/services/product_job_fit.py")
 
@@ -1019,6 +1021,7 @@ def test_the_specification_endpoint_returns_a_fit_assessment():
 
     from app.main import app
 
+
     candidate = make_candidate()
     payload = {
         "candidate": candidate.model_dump(mode="json"),
@@ -1044,7 +1047,7 @@ def test_route_count_unchanged_and_score_still_gone():
 
     from app.main import app
 
-    assert len({route.path for route in app.routes}) == 15
+    assert_route_surface_unchanged(app)
     assert TestClient(app).post("/score", json={}).status_code == 410
 
 
@@ -1055,7 +1058,7 @@ def test_specification_response_is_additive():
     response = schema["components"]["schemas"]["ProductSpecificationResponse"]
     assert "specification" in response["properties"]
     assert "product_job_fit" in response["properties"]
-    assert len(schema["paths"]) == 10
+    assert_openapi_surface_unchanged(schema)
 
 
 def test_every_pattern_is_actually_reachable():

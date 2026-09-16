@@ -664,3 +664,49 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   guards against a short mean, where either alone prevents the defect. One real
   test gap was found and fixed first: the schema-constraint test matched the
   preceding `drop constraint` line, so renaming the `add constraint` passed
+
+## Milestone 7 — the product flow
+
+### Milestone 7A — End-to-end workflow wiring (implemented)
+- Two whole subsystems existed and were unreachable. `deep_collection`,
+  `deep_research`, `evidence_confidence`, `pos_dimensions` and
+  `opportunity_scoring` were imported by no route, as were `5A → 5B → 5C`. A
+  user could discover candidates and jump straight to a product specification
+  **without a score ever being computed**. `app/services/product_workflow.py`
+  wires the existing services together in the canonical order; it introduces
+  no derivation, no provider, no score and no threshold of its own
+- **Scoring happens before product generation.** `/product/specification` now
+  requires a persisted scoring record for the selected candidate in its run.
+  ARCHITECTURE.md orders step 8 before step 10, and §2 rejects problem/product
+  fit as a Step 7 dimension precisely because at step 7 the product does not
+  exist yet
+- **A blocked score is a gate, not a verdict.** A candidate that could not be
+  scored is refused with 409 and a reason naming the missing evidence, stating
+  that this is missing evidence and not a low score. `SCORED_UNCLASSIFIED`
+  passes the gate: it has a score, only the colour was withheld
+- The inline-candidate mode of `/product/specification` bypasses the store and
+  therefore cannot be part of a scored workflow. Rather than leaving that
+  implicit, the response now always carries a `scoring` block — the real record
+  in the store-backed path, `null` plus an explicit boundary statement inline —
+  so an inline specification can never be mistaken for a scored one
+- **Contextual evidence is surfaced beside a score, never inside one.** Price
+  evidence, competition structure and channel reach are carried into the
+  workflow output for reading, and a guard refuses to surface any dimension §5
+  did not mark contextual. Observed asking prices stay asking prices
+- Three routes added: `POST /workflow/deep-research` (steps 7–9),
+  `GET /workflow/runs/{run}/candidates/{candidate}` (stage without re-running),
+  and `POST /workflow/content-plan` (5A→5B→5C, post-score). `POST /score`
+  remains 410 — §12 retains it unchanged, and scoring happens inside the
+  workflow rather than at an endpoint that scores what it is handed
+- The provider builder is now shared by the cheap pass and the deep pass, so
+  the two cannot disagree about what an unavailable capability means
+- The route surface is pinned once in `tests/route_surface.py` as a named set
+  of paths. Eight milestones had each hard-coded a route count, so a deliberate
+  change had to be edited in eight places; a named set also reports WHICH path
+  changed when it fails, where a count only reports that something did
+- 17 mutations of the milestone's boundaries were applied; all 17 were killed
+  after fixing one survivor. An unscoped cross-run evidence read survived
+  because the dossier correctly refuses the mixed scope, leaving `evidence_ids`
+  empty — which satisfied a disjointness assertion vacuously while the second
+  run was in fact completely broken. The test now asserts the run WORKED as
+  well as that it stayed in its own lane

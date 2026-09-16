@@ -15,6 +15,7 @@ resolved silently.
 import random
 import re
 from dataclasses import asdict
+import json
 from uuid import uuid4
 
 import pytest
@@ -870,7 +871,44 @@ def test_endpoint_returns_both_format_answers_separately(client):
     assert rec["ideal_claim_class"] == "ASSUMED"
 
 
-def test_endpoint_reads_stored_evidence_for_a_registered_run(client):
+def _store_a_score(store, candidate_id, run_id, *, scored=True):
+    """Give a candidate the scoring record Milestone 7A now requires.
+
+    Step 8 runs before step 10, so a specification is only generated for a
+    candidate that carries a score.
+    """
+    from app.services.opportunity_scoring import (
+        STATE_BOUNDARIES,
+        Classification,
+        ScoringResult,
+        ScoringState,
+    )
+
+    state = (
+        ScoringState.CLASSIFIED if scored else ScoringState.INSUFFICIENT_EVIDENCE
+    )
+    store.add_scoring_result(
+        ScoringResult(
+            candidate_id=candidate_id,
+            research_run_id=run_id,
+            scoring_state=state,
+            state_boundary=STATE_BOUNDARIES[state],
+            opportunity_score=72.5 if scored else None,
+            evidence_confidence=81.0,
+            classification=Classification.GREEN if scored else None,
+            sub_scores=(),
+            excluded_dimensions=(
+                () if scored else (("deep_search_demand", "not_scoreable"),)
+            ),
+            kill_rules_triggered=(),
+            pos_version="opportunity_score_v1",
+            ecs_version="ecs_v1",
+            threshold_set_version="classification_thresholds_v1",
+        )
+    )
+
+
+def test_endpoint_reads_stored_evidence_for_a_scored_candidate(client):
     from app.api.routes import get_research_store
 
     store: ResearchStore = get_research_store()
@@ -879,16 +917,84 @@ def test_endpoint_reads_stored_evidence_for_a_registered_run(client):
     store.register_run(run_id, [candidate])
     for item in listing_evidence(candidate.id, [comparable("L1"), comparable("L2")]):
         store.add_evidence(item)
+    _store_a_score(store, candidate.id, run_id)
 
     response = client.post(
         "/product/specification",
         json={"research_run_id": str(run_id), "candidate_id": str(candidate.id)},
     )
     assert response.status_code == 200
-    spec = response.json()["specification"]
+    body = response.json()
+    spec = body["specification"]
     assert spec["state"] == "GENERATED"
     assert spec["research_run_id"] == str(run_id)
     assert spec["observed_competitor_patterns"]
+    # The score this specification was generated behind travels with it.
+    assert body["scoring"]["opportunity_score"] == 72.5
+    assert body["scoring"]["classification"] == "GREEN"
+    assert "never a forecast" in body["scoring_boundary"]
+
+
+def test_an_unscored_candidate_cannot_reach_product_generation(client):
+    """Step 8 before step 10: no score, no specification."""
+    from app.api.routes import get_research_store
+
+    store: ResearchStore = get_research_store()
+    candidate = make_spec_candidate()
+    run_id = uuid4()
+    store.register_run(run_id, [candidate])
+    for item in listing_evidence(candidate.id, [comparable("L1")]):
+        store.add_evidence(item)
+
+    response = client.post(
+        "/product/specification",
+        json={"research_run_id": str(run_id), "candidate_id": str(candidate.id)},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["reason"] == "candidate_has_no_scoring_record"
+    assert "run deep research and scoring first" in detail["message"]
+
+
+def test_an_unscoreable_candidate_is_refused_as_unmeasured_not_as_bad(client):
+    from app.api.routes import get_research_store
+
+    store: ResearchStore = get_research_store()
+    candidate = make_spec_candidate()
+    run_id = uuid4()
+    store.register_run(run_id, [candidate])
+    for item in listing_evidence(candidate.id, [comparable("L1")]):
+        store.add_evidence(item)
+    _store_a_score(store, candidate.id, run_id, scored=False)
+
+    response = client.post(
+        "/product/specification",
+        json={"research_run_id": str(run_id), "candidate_id": str(candidate.id)},
+    )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["reason"] == "candidate_could_not_be_scored"
+    assert "not a low score" in detail["message"]
+
+
+def test_the_inline_mode_states_that_no_score_applies_to_it(client):
+    """Inline evidence bypasses the store, so it cannot be part of a scored
+    workflow. Stated rather than omitted, so it cannot be mistaken for one."""
+    candidate = make_spec_candidate()
+    response = client.post(
+        "/product/specification",
+        json={
+            "candidate": json.loads(candidate.model_dump_json()),
+            "evidence": [
+                json.loads(item.model_dump_json())
+                for item in listing_evidence(candidate.id, [comparable("L1")])
+            ],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scoring"] is None
+    assert "must not be presented as a scored result" in body["scoring_boundary"]
 
 
 def test_endpoint_rejects_an_unknown_run(client):
