@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 
+
 class ProviderError(Exception):
     """Base class for research-provider failures.
 

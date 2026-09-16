@@ -256,7 +256,14 @@ class CapabilityOutcome:
     provider_cost_is_estimate: bool | None = None
     quota_units_used: int | None = None
     quota_units_is_exact: bool | None = None
+    # A true cache hit: an entry that was present AND collected at least as
+    # deep as this pass asked for.
     cached_query_count: int = 0
+    # An entry that was present but too shallow, so it was re-fetched.
+    # SPEC_STEP_7_8.md §1.1 requires these be distinguishable: counting a
+    # depth miss as a hit would hide a deep pass that only looked deep.
+    # Always 0 for search demand, whose keyword cache is depth-independent.
+    depth_miss_query_count: int = 0
     failure_reason: str | None = None
 
     @property
@@ -333,7 +340,7 @@ def _evidence_by_candidate(
     return grouped
 
 
-async def _run_search_demand(
+async def run_search_demand_capability(
     candidates, provider, store, run_id, location, language, caps
 ) -> tuple[CapabilityOutcome, dict, UUID | None]:
     result = await run_search_demand_research(
@@ -358,11 +365,15 @@ async def _run_search_demand(
         provider_cost=snapshot.provider_cost,
         provider_cost_is_estimate=snapshot.provider_cost_is_estimate,
         cached_query_count=result.cached_keyword_count,
+        # The keyword cache is keyed per keyword and depth in search demand
+        # means more keywords queried, not more results per keyword, so a
+        # cached metric is equally valid at any depth (§1.1).
+        depth_miss_query_count=0,
     )
     return outcome, result.summaries, snapshot.snapshot_id
 
 
-async def _run_marketplace(
+async def run_marketplace_capability(
     candidates, provider, store, run_id, caps
 ) -> tuple[CapabilityOutcome, dict, UUID | None]:
     result = await run_marketplace_research(
@@ -387,11 +398,12 @@ async def _run_marketplace(
         provider_cost=snapshot.provider_cost,
         provider_cost_is_estimate=snapshot.provider_cost_is_estimate,
         cached_query_count=result.cached_query_count,
+        depth_miss_query_count=result.depth_miss_query_count,
     )
     return outcome, result.summaries, snapshot.snapshot_id
 
 
-async def _run_public_content(
+async def run_public_content_capability(
     candidates, provider, store, run_id, caps
 ) -> tuple[CapabilityOutcome, dict, UUID | None]:
     result = await run_public_content_research(
@@ -419,6 +431,7 @@ async def _run_public_content(
         quota_units_used=result.quota_units_used,
         quota_units_is_exact=result.quota_units_is_exact,
         cached_query_count=result.cached_query_count,
+        depth_miss_query_count=result.depth_miss_query_count,
     )
     return outcome, result.summaries, snapshot.snapshot_id
 
@@ -494,17 +507,17 @@ async def run_preliminary_research(
         # capability's evidence, and the run itself, survive intact.
         try:
             if capability == CAPABILITY_SEARCH_DEMAND:
-                outcome, summaries, snapshot_id = await _run_search_demand(
+                outcome, summaries, snapshot_id = await run_search_demand_capability(
                     candidates, provider, store, run_id, location, language, caps
                 )
                 search_summaries = summaries
             elif capability == CAPABILITY_MARKETPLACE:
-                outcome, summaries, snapshot_id = await _run_marketplace(
+                outcome, summaries, snapshot_id = await run_marketplace_capability(
                     candidates, provider, store, run_id, caps
                 )
                 marketplace_summaries = summaries
             else:
-                outcome, summaries, snapshot_id = await _run_public_content(
+                outcome, summaries, snapshot_id = await run_public_content_capability(
                     candidates, provider, store, run_id, caps
                 )
                 content_summaries = summaries

@@ -57,7 +57,11 @@ from datetime import UTC, datetime, timedelta
 from enum import Enum
 from uuid import UUID
 
-from app.domain.enums import EvidencePurpose
+from app.domain.enums import (
+    COLLECTION_METHOD_CACHE,
+    COLLECTION_METHOD_OFFICIAL_API,
+    EvidencePurpose,
+)
 from app.domain.models import EvidenceItem
 
 ECS_VERSION = "ecs_v1"
@@ -128,8 +132,8 @@ PROVENANCE_DIRECTNESS: dict[DirectnessClass, float] = {
 # table that does differentiate by signal becomes `_v2` without changing a
 # single caller.
 _COLLECTION_METHOD_CLASS: dict[str, DirectnessClass] = {
-    "official_api": DirectnessClass.DIRECT_API,
-    "cache": DirectnessClass.VALIDATED_CACHE,
+    COLLECTION_METHOD_OFFICIAL_API: DirectnessClass.DIRECT_API,
+    COLLECTION_METHOD_CACHE: DirectnessClass.VALIDATED_CACHE,
 }
 
 
@@ -284,13 +288,12 @@ LIMITATIONS: tuple[str, ...] = (
     "are not.",
     "A blocked result is the absence of a measurement, never a confidence of "
     "zero.",
-    "Cache reuse is only visible for search demand. Marketplace and public "
-    "content report the provider's own collection method even when a result "
-    "was reused from cache, so those records are currently scored as direct "
-    "API observations. This OVER-credits their provenance. Explicit cache "
-    "provenance is 6B's responsibility (SPEC_STEP_7_8.md §1.1); until it "
-    "lands, `provenance_directness` is an upper bound for those two "
-    "capabilities, not a measurement.",
+    "Cache reuse is stated by all three capabilities as of 6B, so a reused "
+    "record scores as validated cache rather than as a direct API "
+    "observation. What directness cannot see is depth: a record says how it "
+    "was obtained, not how much of the field was searched to obtain it. "
+    "Depth is carried by sample adequacy and by the deep pass's own cap "
+    "version, never by this component.",
 )
 
 

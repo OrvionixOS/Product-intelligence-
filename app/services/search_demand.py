@@ -18,7 +18,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from app.domain.enums import EvidencePurpose, SnapshotStatus, TruthClass
+from app.domain.enums import (
+    COLLECTION_METHOD_CACHE,
+    EvidencePurpose,
+    SnapshotStatus,
+    TruthClass,
+)
 from app.domain.models import Candidate, EvidenceItem, EvidenceSnapshot
 from app.providers.base import (
     KeywordDemandMetrics,
@@ -210,7 +215,7 @@ async def run_search_demand_research(
         provider=provider.name,
         metrics=[],
         retrieved_at=started_at,
-        collection_method="cache",
+        collection_method=COLLECTION_METHOD_CACHE,
         source_reference="research_store_cache",
     )
     to_fetch: list[str] = []

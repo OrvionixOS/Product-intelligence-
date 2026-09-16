@@ -28,7 +28,12 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from app.domain.enums import EvidencePurpose, SnapshotStatus, TruthClass
+from app.domain.enums import (
+    COLLECTION_METHOD_CACHE,
+    EvidencePurpose,
+    SnapshotStatus,
+    TruthClass,
+)
 from app.domain.models import Candidate, EvidenceItem, EvidenceSnapshot
 from app.providers.base import (
     ProviderError,
@@ -42,7 +47,7 @@ from app.services.public_content_features import (
     summarize_public_content,
 )
 from app.services.search_demand import normalize_query
-from app.storage.memory import ResearchStore
+from app.storage.memory import CacheOutcome, ResearchStore
 
 NORMALIZATION_VERSION = "public_content_norm_v1"
 
@@ -144,7 +149,11 @@ class PublicContentRunResult:
     evidence_ids_by_candidate: dict[UUID, list[UUID]]
     provider_errors: list[str] = field(default_factory=list)
     missing_queries: list[MissingQuery] = field(default_factory=list)
+    # A true cache hit: entry present AND collected at least as deep as this
+    # request. SPEC_STEP_7_8.md §1.1 forbids counting a depth miss here.
     cached_query_count: int = 0
+    # Entry present but collected under a smaller limit, so it was re-fetched.
+    depth_miss_query_count: int = 0
     unique_video_count: int = 0
     quota_units_used: int = 0
     # False when a failure made exact quota consumption unknowable; the
@@ -163,6 +172,7 @@ def build_video_evidence(
     source_reference: str | None,
     originating_queries: tuple[str, ...] | None = None,
     originating_query_shared: bool | None = None,
+    collected_live: bool = True,
 ) -> list[EvidenceItem]:
     """Immutable evidence for one (candidate, video) pair.
 
@@ -183,7 +193,13 @@ def build_video_evidence(
         research_run_id=research_run_id,
         snapshot_id=snapshot_id,
         provider=provider.name,
-        collection_method=provider.collection_method,
+        # Cache reuse is stated, not hidden behind the provider's own method.
+        # Reporting a reused entry as a live API observation over-credits its
+        # provenance, which Evidence Confidence then reads as directness it
+        # never had (SPEC_STEP_7_8.md §1.1, "interaction with provenance").
+        collection_method=(
+            provider.collection_method if collected_live else COLLECTION_METHOD_CACHE
+        ),
         source_reference=source_reference,
         source_url=video.url,
         retrieved_at=video.retrieved_at,
@@ -289,13 +305,18 @@ async def run_public_content_research(
     videos_by_query: dict[str, list[VideoObservation]] = {}
     to_fetch: list[str] = []
     cached_count = 0
+    depth_miss_count = 0
     for query in requested:
-        cached = store.cached_videos(provider.name, query)
-        if cached is not None:
-            videos_by_query[query] = cached
+        lookup = store.cached_videos(provider.name, query, videos_cap)
+        if lookup.outcome is CacheOutcome.HIT:
+            videos_by_query[query] = lookup.items or []
             cached_count += 1
-        else:
-            to_fetch.append(query)
+            continue
+        if lookup.outcome is CacheOutcome.DEPTH_MISS:
+            # Shallower than requested. Re-fetch rather than pass the shallow
+            # set off as deep evidence (§1.1).
+            depth_miss_count += 1
+        to_fetch.append(query)
 
     call_count = 0
     quota_used = 0
@@ -436,6 +457,7 @@ async def run_public_content_research(
             provider.name,
             query,
             [canonical[video.video_id] for video in videos_by_query[query]],
+            effective_limit=videos_cap,
         )
 
     # Build immutable evidence: views + engagement + content records per
@@ -443,6 +465,14 @@ async def run_public_content_research(
     # identical for every candidate sharing the video.
     evidence_ids: dict[UUID, list[UUID]] = {c.id: [] for c in candidates}
     videos_by_candidate: dict[UUID, list[VideoObservation]] = {c.id: [] for c in candidates}
+    # A video reached by at least one live fetch in this pass IS a live
+    # observation, whatever else also returned it. Only a video seen solely
+    # through reused cache entries is cache-sourced.
+    live_video_ids = {
+        video.video_id
+        for query in fetched_queries
+        for video in videos_by_query.get(query, [])
+    }
     evidence_items: list[EvidenceItem] = []
     for video_id in video_order:
         video = canonical[video_id]
@@ -462,6 +492,7 @@ async def run_public_content_research(
                 source_reference,
                 originating_queries=originating_queries,
                 originating_query_shared=query_shared,
+                collected_live=video_id in live_video_ids,
             )
             evidence_items.extend(items)
             evidence_ids[candidate_id].extend(item.id for item in items)
@@ -505,6 +536,7 @@ async def run_public_content_research(
         provider_errors=provider_errors,
         missing_queries=missing,
         cached_query_count=cached_count,
+        depth_miss_query_count=depth_miss_count,
         unique_video_count=len(canonical),
         quota_units_used=quota_used,
         quota_units_is_exact=quota_is_exact,

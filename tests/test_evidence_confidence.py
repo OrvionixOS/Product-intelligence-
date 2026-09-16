@@ -615,10 +615,10 @@ def test_the_forward_looking_directness_classes_are_declared_but_unproduced():
     """Two approved classes have no producer at all.
 
     `provenance_directness_v1` declares five. Production emits two collection
-    methods: `official_api` everywhere, and `cache` from search demand alone
-    (see the cache-provenance test above), so DIRECT_API, VALIDATED_CACHE and
-    UNKNOWN are reachable and the remaining two are not. Recording that here
-    keeps the gap visible instead of letting the table look fully exercised.
+    methods — the official-API and cache constants, the latter now from all
+    three capabilities — so DIRECT_API, VALIDATED_CACHE and UNKNOWN are
+    reachable and the remaining two are not. Recording that here keeps the gap
+    visible instead of letting the table look fully exercised.
     """
     assert PROVENANCE_DIRECTNESS[DirectnessClass.DETERMINISTIC_DERIVATION] == 0.80
     assert PROVENANCE_DIRECTNESS[DirectnessClass.INDIRECT_PROVIDER_MEDIATED] == 0.60
@@ -1355,41 +1355,31 @@ def test_sample_size_for_reports_none_rather_than_zero_when_unreported():
 # --------------------- cache provenance: what is reachable today (review 3)
 
 
-def test_cache_provenance_is_reachable_only_from_search_demand_today():
-    """An integration assumption 6B is responsible for closing.
+def test_every_capability_states_cache_reuse_in_its_provenance():
+    """Closed by 6B. This test previously recorded the gap.
 
-    `VALIDATED_CACHE` requires `collection_method == "cache"`. Only the search
-    demand path emits it. Marketplace and public content pass the provider's
-    own collection method through even when a result was reused from cache, so
-    their cache hits are currently scored as DIRECT_API — an OVER-credit, not
-    an under-credit. This test fails the moment that changes, which is the
-    signal that 6B has landed explicit cache provenance.
+    `VALIDATED_CACHE` requires the cache collection method. Marketplace and
+    public content used to pass the provider's own method through even on
+    cache reuse, so their cache hits scored as DIRECT_API — an over-credit.
+    All three capabilities now state reuse, and each uses the shared domain
+    constant rather than its own spelling of it.
     """
-    emitters = {
-        path.name: 'collection_method="cache"' in path.read_text(encoding="utf-8")
-        for path in (
-            Path("app/services/search_demand.py"),
-            Path("app/services/marketplace.py"),
-            Path("app/services/public_content.py"),
-        )
-    }
-    assert emitters == {
-        "search_demand.py": True,
-        "marketplace.py": False,
-        "public_content.py": False,
-    }
-    # And the two that do not emit it pass the provider's method straight
-    # through, so a cache hit is indistinguishable from a live call.
+    for name in ("search_demand.py", "marketplace.py", "public_content.py"):
+        source = Path(f"app/services/{name}").read_text(encoding="utf-8")
+        assert "COLLECTION_METHOD_CACHE" in source, name
+        assert 'collection_method="cache"' not in source, name
+    # Marketplace and public content choose per record, so a live observation
+    # keeps the provider's own method.
     for name in ("marketplace.py", "public_content.py"):
         source = Path(f"app/services/{name}").read_text(encoding="utf-8")
-        assert "collection_method=provider.collection_method" in source
+        assert "provider.collection_method if collected_live" in source, name
 
 
-def test_the_limitations_name_the_cache_provenance_blind_spot():
+def test_the_limitations_separate_provenance_from_depth():
+    """Directness says how a record was obtained, never how deep the search."""
     joined = " ".join(LIMITATIONS).lower()
-    assert "cache reuse is only visible for search demand" in joined
-    assert "over-credits" in joined
-    assert "6b" in joined
+    assert "cache reuse is stated by all three capabilities" in joined
+    assert "not how much of the field was searched" in joined
 
 
 # ----------------------------------------------------------- reachability
@@ -1546,7 +1536,7 @@ def test_the_symbol_scanner_sees_what_the_module_really_references():
     """The guards below are only worth their green if this holds."""
     symbols = _code_symbols()
     assert {"compute_evidence_confidence", "PROVENANCE_DIRECTNESS"} <= symbols
-    assert "official_api" in symbols, "identifier-shaped literals are in scope"
+    assert "COLLECTION_METHOD_OFFICIAL_API" in symbols
     assert "retrieved_at" in _referenced_attributes()
     # Prose is out of scope, and the module's own refusals prove it.
     header = MODULE_PATH.read_text(encoding="utf-8")
