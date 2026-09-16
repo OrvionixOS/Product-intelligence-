@@ -461,6 +461,25 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   leaves the mean. A missing timestamp, a missing sample size, an unknown
   collection method, a degraded capability and a conflict all lower ECS, and
   no combination of missing evidence can raise it
+- For a REQUIRED dimension, absence is missing expected evidence, never an
+  inapplicable question: it contributes 0.0 to dimension coverage, sample
+  adequacy, corroboration breadth and conflict rate alike. Case-(a) exclusion
+  survives only where the metric cannot apply to a dimension that IS present —
+  a dimension carrying no observations has nothing to agree or disagree about,
+  and one that never reached a scoreable state is outside sample adequacy by
+  §6. Omitting a required dimension is therefore never cheaper than reporting
+  it badly, proved over 300 randomised dimension sets and pinned by the
+  regression it came from
+- Sample counts are per capability, not one scalar. A dimension spanning
+  several capabilities carries counts in incompatible units — D6's keyword,
+  listing and video counts measure three different things against three
+  different floors — so `sample_sizes_by_capability` names each one and each is
+  measured against its own floor. The scalar shorthand exists only where a
+  dimension draws on exactly one capability and refuses D6. A capability that
+  reported no count contributes 0.0 to its dimension's adequacy rather than
+  leaving the average, so silence is never free. Counts are canonically
+  ordered, and a count from a capability the dimension does not draw on, a
+  duplicate, or a negative is refused rather than absorbed
 - BLOCKED is not low confidence. A blocked result is `None` with a reason,
   never `0.0`, and is tested as distinct from a genuine floor-value 0.0
 - `dimension_coverage` and `capability_health` are never excludable. A
@@ -485,10 +504,18 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   (DETERMINISTIC_DERIVATION, INDIRECT_PROVIDER_MEDIATED) are approved policy
   with no current production producer; a test records them as
   declared-but-unproduced rather than letting the table look fully exercised
+- `VALIDATED_CACHE` is reachable today from search demand alone, which is the
+  only path emitting `collection_method="cache"`. Marketplace and public
+  content pass the provider's own collection method through even on cache
+  reuse, so their cache hits currently score as direct API observations — an
+  OVER-credit. Explicit cache provenance is 6B's responsibility (§1.1); until
+  it lands, `provenance_directness` is an upper bound for those two
+  capabilities. A test pins which modules emit it, so it fails the moment 6B
+  changes that
 - Boundary guards scan executed symbols via the AST, not raw file text. A text
   scan reads this module's own refusals ("no POS, no weights, no
   RED/YELLOW/GREEN") as violations, and `PROVENANCE_DIRECTNESS` contains the
   substring "proven"
 - No POS, no `/score` activation, no deep collection, no new endpoint, no
   schema change. Legacy `app/services/scoring.py` remains quarantined
-- 23 mutations of the milestone's boundaries were applied; all 23 were killed
+- 35 mutations of the milestone's boundaries were applied; all 35 were killed

@@ -55,6 +55,7 @@ from app.services.evidence_confidence import (
     EcsState,
     capability_health,
     compute_evidence_confidence,
+    single_capability_sample,
     directness_class,
     provenance_directness,
     record_capability,
@@ -89,18 +90,57 @@ def evidence_item(
     )
 
 
+def observation(
+    dimension: EcsDimension,
+    *,
+    scoreable: bool = True,
+    sample_size: int | None = 100,
+    samples: dict[Capability, int] | None = None,
+    surfaces: int | None = None,
+    observations: int = 50,
+    conflicts: int = 0,
+) -> DimensionObservation:
+    """Build one dimension summary.
+
+    `samples` names each capability's own count and is the only way to describe
+    a multi-capability dimension honestly. `sample_size` is a fixture
+    convenience for the single-capability case; where it is applied to D6 it
+    gives all three capabilities the same count, which is never the subject of
+    a test that cares about D6's units.
+    """
+    if samples is not None:
+        counts = tuple(samples.items())
+    elif sample_size is None:
+        counts = ()
+    elif len(DIMENSION_CAPABILITIES[dimension]) == 1:
+        counts = single_capability_sample(dimension, sample_size)
+    else:
+        counts = tuple(
+            (capability, sample_size)
+            for capability in DIMENSION_CAPABILITIES[dimension]
+        )
+    return DimensionObservation(
+        dimension=dimension,
+        scoreable=scoreable,
+        sample_sizes_by_capability=counts,
+        distinct_surfaces=(
+            EXPECTED_SURFACES[dimension] if surfaces is None else surfaces
+        ),
+        observation_count=observations,
+        conflicting_observation_count=conflicts,
+    )
+
+
 def healthy_dimensions(
     *, sample_size: int | None = 100, conflicts: int = 0, observations: int = 50
 ) -> list[DimensionObservation]:
     """Every required dimension scoreable, fully corroborated, no conflicts."""
     return [
-        DimensionObservation(
-            dimension=dimension,
-            scoreable=True,
+        observation(
+            dimension,
             sample_size=sample_size,
-            distinct_surfaces=EXPECTED_SURFACES[dimension],
-            observation_count=observations,
-            conflicting_observation_count=conflicts,
+            observations=observations,
+            conflicts=conflicts,
         )
         for dimension in REQUIRED_DIMENSIONS
     ]
@@ -430,7 +470,9 @@ def test_blocked_is_distinct_from_the_lowest_computable_confidence():
     worst = run(
         candidate_id,
         [
-            DimensionObservation(d, False, None, 0, 0, 0)
+            observation(
+                d, scoreable=False, sample_size=None, surfaces=0, observations=0
+            )
             for d in REQUIRED_DIMENSIONS
         ],
         healthy_capabilities("FAILED"),
@@ -570,12 +612,13 @@ def test_the_v1_directness_table_is_degenerate_in_signal_and_purpose():
 
 
 def test_the_forward_looking_directness_classes_are_declared_but_unproduced():
-    """Two approved classes have no current collection method.
+    """Two approved classes have no producer at all.
 
-    `provenance_directness_v1` declares five classes. Only two are reachable
-    from production today, because only `official_api` and `cache` are emitted.
-    Recording that here keeps the gap visible instead of letting the table look
-    fully exercised.
+    `provenance_directness_v1` declares five. Production emits two collection
+    methods: `official_api` everywhere, and `cache` from search demand alone
+    (see the cache-provenance test above), so DIRECT_API, VALIDATED_CACHE and
+    UNKNOWN are reachable and the remaining two are not. Recording that here
+    keeps the gap visible instead of letting the table look fully exercised.
     """
     assert PROVENANCE_DIRECTNESS[DirectnessClass.DETERMINISTIC_DERIVATION] == 0.80
     assert PROVENANCE_DIRECTNESS[DirectnessClass.INDIRECT_PROVIDER_MEDIATED] == 0.60
@@ -704,7 +747,7 @@ def test_a_dimension_with_no_observations_leaves_the_conflict_average():
     """Case (a) inside the component: there is nothing to agree or disagree."""
     candidate_id = uuid4()
     dimensions = [
-        DimensionObservation(d, True, 100, EXPECTED_SURFACES[d], 0, 0)
+        observation(d, observations=0)
         for d in REQUIRED_DIMENSIONS
     ]
     result = run(
@@ -726,9 +769,7 @@ def test_dimension_coverage_counts_only_required_dimensions():
     candidate_id = uuid4()
     assert EcsDimension.PRICE_EVIDENCE not in REQUIRED_DIMENSIONS
     partial = [
-        DimensionObservation(
-            d, d is not EcsDimension.CHANNEL_REACH, 100, EXPECTED_SURFACES[d], 50, 0
-        )
+        observation(d, scoreable=d is not EcsDimension.CHANNEL_REACH)
         for d in REQUIRED_DIMENSIONS
     ]
     result = run(
@@ -750,8 +791,12 @@ def test_an_optional_dimension_never_changes_coverage():
         candidate_id,
         healthy_dimensions()
         + [
-            DimensionObservation(
-                EcsDimension.PRICE_EVIDENCE, False, None, 0, 0, 0
+            observation(
+                EcsDimension.PRICE_EVIDENCE,
+                scoreable=False,
+                sample_size=None,
+                surfaces=0,
+                observations=0,
             )
         ],
         healthy_capabilities(),
@@ -771,6 +816,7 @@ def test_dimension_coverage_is_never_excludable():
     assert coverage.score == 0.0
     assert NEVER_EXCLUDABLE == {
         ComponentName.DIMENSION_COVERAGE,
+        ComponentName.CORROBORATION_BREADTH,
         ComponentName.CAPABILITY_HEALTH,
     }
 
@@ -779,40 +825,60 @@ def test_dimension_coverage_is_never_excludable():
 
 
 def test_sample_adequacy_saturates_at_the_declared_floor():
+    """Every dimension at the same multiple of its own floors, so the
+    component's mean equals the per-dimension value under test."""
     candidate_id = uuid4()
-    for multiple, expected in ((1, 1.0), (10, 1.0)):
+    for multiple in (1, 10):
         result = run(
             candidate_id,
             [
-                DimensionObservation(
-                    EcsDimension.SEARCH_DEMAND,
-                    True,
-                    SAMPLE_FLOORS[Capability.SEARCH_DEMAND] * multiple,
-                    1,
-                    10,
-                    0,
+                observation(
+                    dimension,
+                    samples={
+                        capability: SAMPLE_FLOORS[capability] * multiple
+                        for capability in DIMENSION_CAPABILITIES[dimension]
+                    },
                 )
+                for dimension in REQUIRED_DIMENSIONS
             ],
             healthy_capabilities(),
             one_record_per_capability(candidate_id),
         )
-        assert component(result, ComponentName.SAMPLE_ADEQUACY).score == expected
+        assert component(result, ComponentName.SAMPLE_ADEQUACY).score == 1.0
+
+
+# Two fifths of every declared floor: 2 of 5 keywords, 4 of 10 listings, 4 of
+# 10 videos. Chosen so the ratio is exactly 0.4 for each capability rather than
+# recomputing the implementation's own arithmetic in the assertion.
+TWO_FIFTHS_OF_EVERY_FLOOR = {
+    Capability.SEARCH_DEMAND: 2,
+    Capability.MARKETPLACE: 4,
+    Capability.PUBLIC_CONTENT: 4,
+}
 
 
 def test_a_thin_sample_scores_proportionally_below_the_floor():
     candidate_id = uuid4()
-    floor = SAMPLE_FLOORS[Capability.MARKETPLACE]
+    assert all(
+        TWO_FIFTHS_OF_EVERY_FLOOR[capability] / SAMPLE_FLOORS[capability] == 0.4
+        for capability in Capability
+    )
     result = run(
         candidate_id,
         [
-            DimensionObservation(
-                EcsDimension.PURCHASE_PROXY_EVIDENCE, True, floor // 2, 1, 10, 0
+            observation(
+                dimension,
+                samples={
+                    capability: TWO_FIFTHS_OF_EVERY_FLOOR[capability]
+                    for capability in DIMENSION_CAPABILITIES[dimension]
+                },
             )
+            for dimension in REQUIRED_DIMENSIONS
         ],
         healthy_capabilities(),
         one_record_per_capability(candidate_id),
     )
-    assert component(result, ComponentName.SAMPLE_ADEQUACY).score == pytest.approx(0.5)
+    assert component(result, ComponentName.SAMPLE_ADEQUACY).score == pytest.approx(0.4)
 
 
 def test_corroboration_breadth_uses_the_expected_surfaces_from_the_contract():
@@ -824,15 +890,19 @@ def test_corroboration_breadth_uses_the_expected_surfaces_from_the_contract():
     )
 
     candidate_id = uuid4()
+    dimensions = [
+        observation(d, surfaces=1 if d is EcsDimension.CHANNEL_REACH else None)
+        for d in REQUIRED_DIMENSIONS
+    ]
     result = run(
         candidate_id,
-        [DimensionObservation(EcsDimension.CHANNEL_REACH, True, 100, 1, 10, 0)],
+        dimensions,
         healthy_capabilities(),
         one_record_per_capability(candidate_id),
     )
-    # One surface of three expected.
+    # D6 reaches one surface of the three expected; the other four are full.
     assert component(result, ComponentName.CORROBORATION_BREADTH).score == pytest.approx(
-        1 / 3
+        (4 + 1 / 3) / 5
     )
 
 
@@ -840,7 +910,7 @@ def test_extra_surfaces_do_not_push_breadth_above_one():
     candidate_id = uuid4()
     result = run(
         candidate_id,
-        [DimensionObservation(EcsDimension.SEARCH_DEMAND, True, 100, 9, 10, 0)],
+        [observation(d, surfaces=9) for d in REQUIRED_DIMENSIONS],
         healthy_capabilities(),
         one_record_per_capability(candidate_id),
     )
@@ -895,13 +965,17 @@ def test_confidence_is_bounded_and_rounded_to_two_places():
     rng = random.Random(2026)
     for _ in range(200):
         dimensions = [
-            DimensionObservation(
+            observation(
                 d,
-                rng.random() > 0.3,
-                rng.choice([None, 0, 1, 7, 50]),
-                rng.randint(0, 4),
-                rng.randint(0, 40),
-                rng.randint(0, 40),
+                scoreable=rng.random() > 0.3,
+                samples={
+                    capability: rng.choice([0, 1, 7, 50])
+                    for capability in DIMENSION_CAPABILITIES[d]
+                    if rng.random() > 0.25
+                },
+                surfaces=rng.randint(0, 4),
+                observations=rng.randint(0, 40),
+                conflicts=rng.randint(0, 40),
             )
             for d in REQUIRED_DIMENSIONS
         ]
@@ -996,6 +1070,328 @@ def test_the_same_inputs_always_produce_the_same_number():
         )
 
 
+# ------------------------------- absence of a required dimension (review 1)
+
+
+PER_DIMENSION_COMPONENTS = (
+    ComponentName.DIMENSION_COVERAGE,
+    ComponentName.SAMPLE_ADEQUACY,
+    ComponentName.CORROBORATION_BREADTH,
+    ComponentName.CONFLICT_RATE,
+)
+
+
+def test_removing_a_required_dimension_can_never_raise_breadth_or_ecs():
+    """The regression this exists for.
+
+    A required dimension that is present but worthless on every axis used to be
+    cheaper to DELETE than to report: absence left the breadth, sample and
+    conflict denominators, so dropping the worst dimension raised ECS from 88.0
+    to 96.0. For a required dimension, absence is missing expected evidence,
+    never an inapplicable question.
+    """
+    candidate_id = uuid4()
+    capabilities = healthy_capabilities()
+    worthless = observation(
+        REQUIRED_DIMENSIONS[0],
+        samples={c: 0 for c in DIMENSION_CAPABILITIES[REQUIRED_DIMENSIONS[0]]},
+        surfaces=0,
+        observations=10,
+        conflicts=10,
+    )
+    others = [observation(d, observations=10) for d in REQUIRED_DIMENSIONS[1:]]
+
+    reported = run(candidate_id, [worthless] + others, capabilities, [])
+    deleted = run(candidate_id, others, capabilities, [])
+
+    assert deleted.evidence_confidence <= reported.evidence_confidence
+    assert (
+        component(deleted, ComponentName.CORROBORATION_BREADTH).score
+        <= component(reported, ComponentName.CORROBORATION_BREADTH).score
+    )
+    # Every per-dimension component must fall or hold, never rise.
+    for name in PER_DIMENSION_COMPONENTS:
+        before = component(reported, name).score
+        after = component(deleted, name).score
+        if before is not None and after is not None:
+            assert after <= before, name
+
+
+def test_a_missing_required_dimension_scores_zero_and_stays_in_every_denominator():
+    candidate_id = uuid4()
+    absent = REQUIRED_DIMENSIONS[-1]
+    result = run(
+        candidate_id,
+        [observation(d, observations=10) for d in REQUIRED_DIMENSIONS if d is not absent],
+        healthy_capabilities(),
+        one_record_per_capability(candidate_id),
+    )
+    for name in PER_DIMENSION_COMPONENTS:
+        emitted = component(result, name)
+        assert emitted.applicability is Applicability.COUNTED, name
+        assert emitted.units_counted == len(REQUIRED_DIMENSIONS), name
+        assert emitted.units_excluded == 0, name
+        assert emitted.score == pytest.approx(4 / 5), name
+
+
+def test_no_required_dimension_is_ever_cheaper_to_omit_than_to_report():
+    """Property form, over randomised dimension sets."""
+    candidate_id = uuid4()
+    rng = random.Random(61_2026)
+    for _ in range(300):
+        dimensions = [
+            observation(
+                d,
+                scoreable=rng.random() > 0.2,
+                samples={
+                    capability: rng.choice([0, 1, 4, 30])
+                    for capability in DIMENSION_CAPABILITIES[d]
+                    if rng.random() > 0.2
+                },
+                surfaces=rng.randint(0, 3),
+                observations=rng.randint(0, 20),
+                conflicts=rng.randint(0, 20),
+            )
+            for d in REQUIRED_DIMENSIONS
+        ]
+        capabilities = healthy_capabilities()
+        full = run(candidate_id, dimensions, capabilities, [])
+        for index in range(len(dimensions)):
+            fewer = dimensions[:index] + dimensions[index + 1 :]
+            dropped = run(candidate_id, fewer, capabilities, [])
+            assert dropped.evidence_confidence <= full.evidence_confidence
+            assert (
+                component(dropped, ComponentName.CORROBORATION_BREADTH).score
+                <= component(full, ComponentName.CORROBORATION_BREADTH).score
+            )
+
+
+def test_corroboration_breadth_is_never_excludable():
+    candidate_id = uuid4()
+    result = run(candidate_id, [], healthy_capabilities(), [])
+    breadth = component(result, ComponentName.CORROBORATION_BREADTH)
+    assert breadth.applicability is Applicability.COUNTED
+    assert breadth.score == 0.0
+    assert breadth.exclusion_clause is None
+    assert breadth.units_excluded == 0
+
+
+def test_case_a_exclusion_survives_only_where_the_metric_cannot_apply():
+    """A PRESENT dimension may still be inapplicable to a given component."""
+    candidate_id = uuid4()
+    # Present, scoreable, but carrying nothing to agree or disagree about.
+    quiet = run(
+        candidate_id,
+        [observation(d, observations=0) for d in REQUIRED_DIMENSIONS],
+        healthy_capabilities(),
+        one_record_per_capability(candidate_id),
+    )
+    assert (
+        component(quiet, ComponentName.CONFLICT_RATE).applicability
+        is Applicability.NOT_APPLICABLE
+    )
+    # Present, but never reached a scoreable state: §6 makes sample adequacy
+    # inapplicable to it, and dimension_coverage carries the cost.
+    unscoreable = run(
+        candidate_id,
+        [observation(d, scoreable=False) for d in REQUIRED_DIMENSIONS],
+        healthy_capabilities(),
+        one_record_per_capability(candidate_id),
+    )
+    assert (
+        component(unscoreable, ComponentName.SAMPLE_ADEQUACY).applicability
+        is Applicability.NOT_APPLICABLE
+    )
+    assert component(unscoreable, ComponentName.DIMENSION_COVERAGE).score == 0.0
+
+
+# --------------------------- per-capability sample counts (review 2)
+
+
+def test_d6_measures_each_capability_against_its_own_floor():
+    """D6 spans three capabilities whose counts are in incompatible units."""
+    candidate_id = uuid4()
+    assert DIMENSION_CAPABILITIES[EcsDimension.CHANNEL_REACH] == tuple(Capability)
+    mixed = {
+        Capability.SEARCH_DEMAND: 5,  # floor 5  -> 1.0
+        Capability.MARKETPLACE: 5,  # floor 10 -> 0.5
+        Capability.PUBLIC_CONTENT: 0,  # floor 10 -> 0.0
+    }
+    result = run(
+        candidate_id,
+        [observation(EcsDimension.CHANNEL_REACH, samples=mixed)],
+        healthy_capabilities(),
+        one_record_per_capability(candidate_id),
+    )
+    # Four absent required dimensions contribute 0.0; D6 contributes its own
+    # per-capability mean of (1.0 + 0.5 + 0.0) / 3.
+    assert component(result, ComponentName.SAMPLE_ADEQUACY).score == pytest.approx(
+        0.5 / 5
+    )
+
+
+def test_one_scalar_against_three_floors_gives_a_different_and_wrong_answer():
+    """Pins the defect: the old scalar could not represent D6.
+
+    A single count of 5 measured against all three floors reads as
+    (1.0 + 0.5 + 0.5) / 3. The same evidence described honestly -- 5 keywords,
+    5 listings, 5 videos -- is the same thing here, but a count of 5 VIDEOS is
+    not a count of 5 keywords, and the contract now forces the caller to say
+    which is which.
+    """
+    scalar_reading = (1.0 + 0.5 + 0.5) / 3
+    honest_reading = (1.0 + 0.5 + 0.0) / 3  # 5 keywords, 5 listings, 0 videos
+    assert scalar_reading != honest_reading
+    with pytest.raises(ValueError, match="capabilities"):
+        single_capability_sample(EcsDimension.CHANNEL_REACH, 5)
+
+
+def test_a_capability_that_reported_no_count_scores_zero_and_is_not_excluded():
+    """The anti-inflation rule, inside a multi-capability dimension."""
+    candidate_id = uuid4()
+    complete = run(
+        candidate_id,
+        [
+            observation(
+                EcsDimension.CHANNEL_REACH,
+                samples={c: SAMPLE_FLOORS[c] for c in Capability},
+            )
+        ],
+        healthy_capabilities(),
+        one_record_per_capability(candidate_id),
+    )
+    silent_video = run(
+        candidate_id,
+        [
+            observation(
+                EcsDimension.CHANNEL_REACH,
+                samples={
+                    Capability.SEARCH_DEMAND: SAMPLE_FLOORS[Capability.SEARCH_DEMAND],
+                    Capability.MARKETPLACE: SAMPLE_FLOORS[Capability.MARKETPLACE],
+                },
+            )
+        ],
+        healthy_capabilities(),
+        one_record_per_capability(candidate_id),
+    )
+    full = component(complete, ComponentName.SAMPLE_ADEQUACY).score
+    partial = component(silent_video, ComponentName.SAMPLE_ADEQUACY).score
+    # Had the unreported capability been dropped from D6's average instead of
+    # scoring 0.0, the two would be equal and silence would have been free.
+    assert partial < full
+    # Component scores are emitted rounded to 6dp, so compare against that.
+    assert partial == round((2 / 3) / 5, 6)
+
+
+@pytest.mark.parametrize(
+    "dimension", [d for d in EcsDimension if len(DIMENSION_CAPABILITIES[d]) == 1]
+)
+def test_the_scalar_shorthand_is_allowed_only_where_it_is_unambiguous(dimension):
+    counts = single_capability_sample(dimension, 7)
+    assert counts == ((DIMENSION_CAPABILITIES[dimension][0], 7),)
+
+
+def test_a_count_from_a_capability_the_dimension_does_not_use_is_refused():
+    with pytest.raises(ValueError, match="does not draw on"):
+        DimensionObservation(
+            dimension=EcsDimension.SEARCH_DEMAND,
+            scoreable=True,
+            sample_sizes_by_capability=((Capability.PUBLIC_CONTENT, 10),),
+            distinct_surfaces=1,
+            observation_count=1,
+            conflicting_observation_count=0,
+        )
+
+
+def test_duplicate_and_negative_sample_counts_are_refused():
+    with pytest.raises(ValueError, match="duplicate"):
+        DimensionObservation(
+            dimension=EcsDimension.CHANNEL_REACH,
+            scoreable=True,
+            sample_sizes_by_capability=(
+                (Capability.MARKETPLACE, 5),
+                (Capability.MARKETPLACE, 6),
+            ),
+            distinct_surfaces=1,
+            observation_count=1,
+            conflicting_observation_count=0,
+        )
+    with pytest.raises(ValueError, match="negative"):
+        DimensionObservation(
+            dimension=EcsDimension.SEARCH_DEMAND,
+            scoreable=True,
+            sample_sizes_by_capability=((Capability.SEARCH_DEMAND, -1),),
+            distinct_surfaces=1,
+            observation_count=1,
+            conflicting_observation_count=0,
+        )
+
+
+def test_sample_counts_are_canonically_ordered_whatever_order_they_arrive_in():
+    counts = {c: SAMPLE_FLOORS[c] for c in Capability}
+    orderings = [
+        tuple(counts.items()),
+        tuple(reversed(list(counts.items()))),
+        tuple(sorted(counts.items(), key=lambda pair: -SAMPLE_FLOORS[pair[0]])),
+    ]
+    emitted = {
+        observation(
+            EcsDimension.CHANNEL_REACH, samples=dict(ordering)
+        ).sample_sizes_by_capability
+        for ordering in orderings
+    }
+    assert len(emitted) == 1
+
+
+def test_sample_size_for_reports_none_rather_than_zero_when_unreported():
+    """None is 'did not report'; 0 is 'reported nothing found'. Not the same."""
+    reported_zero = observation(
+        EcsDimension.CHANNEL_REACH, samples={Capability.MARKETPLACE: 0}
+    )
+    assert reported_zero.sample_size_for(Capability.MARKETPLACE) == 0
+    assert reported_zero.sample_size_for(Capability.PUBLIC_CONTENT) is None
+
+
+# --------------------- cache provenance: what is reachable today (review 3)
+
+
+def test_cache_provenance_is_reachable_only_from_search_demand_today():
+    """An integration assumption 6B is responsible for closing.
+
+    `VALIDATED_CACHE` requires `collection_method == "cache"`. Only the search
+    demand path emits it. Marketplace and public content pass the provider's
+    own collection method through even when a result was reused from cache, so
+    their cache hits are currently scored as DIRECT_API — an OVER-credit, not
+    an under-credit. This test fails the moment that changes, which is the
+    signal that 6B has landed explicit cache provenance.
+    """
+    emitters = {
+        path.name: 'collection_method="cache"' in path.read_text(encoding="utf-8")
+        for path in (
+            Path("app/services/search_demand.py"),
+            Path("app/services/marketplace.py"),
+            Path("app/services/public_content.py"),
+        )
+    }
+    assert emitters == {
+        "search_demand.py": True,
+        "marketplace.py": False,
+        "public_content.py": False,
+    }
+    # And the two that do not emit it pass the provider's method straight
+    # through, so a cache hit is indistinguishable from a live call.
+    for name in ("marketplace.py", "public_content.py"):
+        source = Path(f"app/services/{name}").read_text(encoding="utf-8")
+        assert "collection_method=provider.collection_method" in source
+
+
+def test_the_limitations_name_the_cache_provenance_blind_spot():
+    joined = " ".join(LIMITATIONS).lower()
+    assert "cache reuse is only visible for search demand" in joined
+    assert "over-credits" in joined
+    assert "6b" in joined
+
+
 # ----------------------------------------------------------- reachability
 
 
@@ -1010,7 +1406,7 @@ def _sweep_results():
     yield run(
         candidate_id,
         [
-            DimensionObservation(d, True, 1, 0, 0, 0)
+            observation(d, sample_size=1, surfaces=0, observations=0)
             for d in REQUIRED_DIMENSIONS
         ],
         [

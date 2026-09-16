@@ -229,9 +229,15 @@ COMPONENT_ORDER: tuple[ComponentName, ...] = (
     ComponentName.CONFLICT_RATE,
 )
 
-# §6.1: these two can never be excluded by any path.
+# §6.1: these can never be excluded by any path. Each is a question that a
+# required Step 7 dimension always answers -- if the dimension is missing, the
+# answer is "no evidence", which is a 0.0, never an inapplicable question.
 NEVER_EXCLUDABLE: frozenset[ComponentName] = frozenset(
-    {ComponentName.DIMENSION_COVERAGE, ComponentName.CAPABILITY_HEALTH}
+    {
+        ComponentName.DIMENSION_COVERAGE,
+        ComponentName.CORROBORATION_BREADTH,
+        ComponentName.CAPABILITY_HEALTH,
+    }
 )
 
 
@@ -278,6 +284,13 @@ LIMITATIONS: tuple[str, ...] = (
     "are not.",
     "A blocked result is the absence of a measurement, never a confidence of "
     "zero.",
+    "Cache reuse is only visible for search demand. Marketplace and public "
+    "content report the provider's own collection method even when a result "
+    "was reused from cache, so those records are currently scored as direct "
+    "API observations. This OVER-credits their provenance. Explicit cache "
+    "provenance is 6B's responsibility (SPEC_STEP_7_8.md §1.1); until it "
+    "lands, `provenance_directness` is an upper bound for those two "
+    "capabilities, not a measurement.",
 )
 
 
@@ -296,13 +309,79 @@ class DimensionObservation:
     dimension: EcsDimension
     # Did the dimension reach a scoreable state at all?
     scoreable: bool
-    # None means the dimension cannot report its sample. It is NOT zero, and
-    # per §6 it is case (b): it scores 0.0 and stays in the mean.
-    sample_size: int | None
+    # Sample counts keyed by the capability that produced each one.
+    #
+    # Not a scalar, because a dimension may draw on more than one capability
+    # and their counts are in incompatible units. D6 spans all three: a keyword
+    # count, a listing count and a video count, measured against three
+    # different floors. One integer cannot stand for all three without being
+    # compared to floors it does not belong to.
+    #
+    # A capability the dimension draws on but which is absent from this tuple
+    # is expected-but-unreported -- case (b): it contributes 0.0 to the
+    # dimension's adequacy and is never excluded from it.
+    #
+    # Canonically ordered on construction, so the order a caller supplies
+    # counts in cannot change any emitted value.
+    sample_sizes_by_capability: tuple[tuple[Capability, int], ...]
     # Distinct provider/platform surfaces that contributed.
     distinct_surfaces: int
     observation_count: int
     conflicting_observation_count: int
+
+    def __post_init__(self) -> None:
+        expected = DIMENSION_CAPABILITIES[self.dimension]
+        seen: set[Capability] = set()
+        for capability, count in self.sample_sizes_by_capability:
+            if capability not in expected:
+                raise ValueError(
+                    f"{self.dimension.value} does not draw on "
+                    f"{capability.value}; a count from a capability the "
+                    "dimension does not use is a caller error, not evidence"
+                )
+            if capability in seen:
+                raise ValueError(
+                    f"duplicate sample count for {capability.value} on "
+                    f"{self.dimension.value}"
+                )
+            if count < 0:
+                raise ValueError(
+                    f"negative sample count for {capability.value} on "
+                    f"{self.dimension.value}"
+                )
+            seen.add(capability)
+        object.__setattr__(
+            self,
+            "sample_sizes_by_capability",
+            tuple(
+                sorted(self.sample_sizes_by_capability, key=lambda pair: pair[0].value)
+            ),
+        )
+
+    def sample_size_for(self, capability: Capability) -> int | None:
+        """This capability's reported count, or None if it reported none."""
+        for reported, count in self.sample_sizes_by_capability:
+            if reported is capability:
+                return count
+        return None
+
+
+def single_capability_sample(
+    dimension: EcsDimension, count: int
+) -> tuple[tuple[Capability, int], ...]:
+    """Sample counts for a dimension that draws on exactly one capability.
+
+    The scalar shorthand is available only where it is unambiguous. Calling it
+    for a multi-capability dimension raises rather than silently comparing one
+    integer against several unrelated floors.
+    """
+    capabilities = DIMENSION_CAPABILITIES[dimension]
+    if len(capabilities) != 1:
+        raise ValueError(
+            f"{dimension.value} draws on {len(capabilities)} capabilities; "
+            "supply a count per capability instead of one scalar"
+        )
+    return ((capabilities[0], count),)
 
 
 @dataclass(slots=True, frozen=True)
@@ -442,6 +521,22 @@ def _freshness_score(item: EvidenceItem, now: datetime) -> float:
     if age >= window:
         return 0.0
     return 1.0 - (age / window)
+
+
+def _capability_adequacy(
+    observation: DimensionObservation, capability: Capability
+) -> float:
+    """One capability's sample adequacy within a dimension, against its floor.
+
+    Each count is measured against the floor for the capability that produced
+    it, never against another capability's floor.
+    """
+    count = observation.sample_size_for(capability)
+    if count is None:
+        # Expected from this capability and not reported. Case (b): 0.0, and it
+        # stays in the dimension's average.
+        return 0.0
+    return min(1.0, count / SAMPLE_FLOORS[capability])
 
 
 def _in_scope(
@@ -609,19 +704,26 @@ def compute_evidence_confidence(
     sample_excluded = 0
     for dimension in REQUIRED_DIMENSIONS:
         observation = by_dimension.get(dimension)
-        if observation is None or not observation.scoreable:
-            # Not scoreable: the question does not apply, and the cost is
-            # already carried by dimension_coverage.
-            sample_excluded += 1
-            continue
-        if observation.sample_size is None:
+        if observation is None:
+            # A required dimension that was never supplied is missing expected
+            # evidence, not an inapplicable question. Excluding it would let
+            # dropping the worst dimension RAISE the component.
             sample_scores.append(0.0)
             continue
-        # D6 spans three capabilities and the approved floors are per
-        # capability, so its adequacy is the mean of its constituents' — which
-        # introduces no number the policy set does not already contain.
+        if not observation.scoreable:
+            # Present but not scoreable: §6 makes this component applicable to
+            # dimensions that reached a scoreable state, so the question really
+            # does not apply, and the cost is carried by dimension_coverage.
+            sample_excluded += 1
+            continue
+        # Each capability the dimension draws on is measured against its own
+        # floor, and the dimension's adequacy is the mean of those. For a
+        # single-capability dimension that is just its own ratio; for D6 it is
+        # three ratios in their own units, never one count against three
+        # unrelated floors. No number enters that the policy set does not
+        # already contain.
         per_capability = [
-            min(1.0, observation.sample_size / SAMPLE_FLOORS[capability])
+            _capability_adequacy(observation, capability)
             for capability in DIMENSION_CAPABILITIES[dimension]
         ]
         sample_scores.append(sum(per_capability) / len(per_capability))
@@ -646,20 +748,19 @@ def compute_evidence_confidence(
 
     # 4. corroboration_breadth — expected surfaces read from §2, never chosen.
     breadth_scores: list[float] = []
-    breadth_excluded = 0
     for dimension in REQUIRED_DIMENSIONS:
         observation = by_dimension.get(dimension)
         if observation is None:
-            breadth_excluded += 1
+            # Missing expected corroboration, not an inapplicable question.
+            breadth_scores.append(0.0)
             continue
         breadth_scores.append(
             min(1.0, observation.distinct_surfaces / EXPECTED_SURFACES[dimension])
         )
+    # Every required dimension contributes, so nothing is ever excluded here
+    # and the component is never empty.
     breadth = _component(
-        ComponentName.CORROBORATION_BREADTH,
-        breadth_scores,
-        breadth_excluded,
-        "no_required_dimension_was_supplied",
+        ComponentName.CORROBORATION_BREADTH, breadth_scores, 0, None
     )
 
     # 5. freshness — applicable to every contributing record.
@@ -698,7 +799,13 @@ def compute_evidence_confidence(
     conflict_excluded = 0
     for dimension in REQUIRED_DIMENSIONS:
         observation = by_dimension.get(dimension)
-        if observation is None or observation.observation_count <= 0:
+        if observation is None:
+            # Missing expected evidence cannot be uncontested evidence.
+            conflict_scores.append(0.0)
+            continue
+        if observation.observation_count <= 0:
+            # Present but carrying nothing to agree or disagree about. That is
+            # a genuinely inapplicable question, so it is case (a).
             conflict_excluded += 1
             continue
         rate = observation.conflicting_observation_count / observation.observation_count
