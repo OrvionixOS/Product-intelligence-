@@ -58,6 +58,8 @@ from app.services.faceless_content_intelligence import (
 )
 from app.services.preliminary_dimensions import DimensionState
 
+from tests.route_surface import assert_route_surface_unchanged
+
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 MODULE_PATH = Path("app/services/content_patterns.py")
 
@@ -1614,7 +1616,8 @@ def test_no_endpoint_was_added_and_score_remains_gone():
 
     from app.main import app
 
-    assert len({route.path for route in app.routes}) == 15
+
+    assert_route_surface_unchanged(app)
     assert TestClient(app).post("/score", json={}).status_code == 410
 
 

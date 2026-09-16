@@ -67,6 +67,8 @@ from tests.test_orchestration import (
     video_for,
 )
 
+from tests.route_surface import assert_openapi_surface_unchanged, assert_route_surface_unchanged
+
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 MODULE_PATH = Path("app/services/audience_attention.py")
 
@@ -953,6 +955,7 @@ async def test_3c_scored_audience_dimension_is_untouched():
 def test_response_exposes_audience_attention_additively():
     from app.main import app
 
+
     schema = app.openapi()
     response = schema["components"]["schemas"]["PreliminaryResearchResponse"]
     assert "audience_attention" in response["properties"]
@@ -965,7 +968,7 @@ def test_response_exposes_audience_attention_additively():
     ):
         assert field in response["properties"]
         assert field in response["required"]
-    assert len(schema["paths"]) == 10
+    assert_openapi_surface_unchanged(schema)
 
 
 def test_score_endpoint_remains_gone():
@@ -979,7 +982,7 @@ def test_score_endpoint_remains_gone():
 def test_route_count_is_unchanged():
     from app.main import app
 
-    assert len({route.path for route in app.routes}) == 15
+    assert_route_surface_unchanged(app)
 
 
 def test_a_view_count_is_read_from_the_evidence_record_not_the_payload():

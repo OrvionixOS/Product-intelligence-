@@ -89,6 +89,18 @@ from app.services.purchase_evidence import (
     PurchaseEvidenceResult,
     extract_purchase_evidence,
 )
+from app.services.opportunity_scoring import ScoringResult
+from app.services.product_workflow import (
+    CandidateWorkflowResult,
+    ContextualEvidence,
+    DeepResearchRunResult,
+    WorkflowGateError,
+    derive_content_plan,
+    require_scored_candidate,
+    run_deep_research_and_score,
+    unscoreable_reason,
+    workflow_state,
+)
 from app.services.research_orchestration import (
     CAPABILITY_MARKETPLACE,
     CAPABILITY_PUBLIC_CONTENT,
@@ -112,6 +124,51 @@ router = APIRouter()
 # Process-wide append-only research store (V1 persistence seam; see schema.sql
 # for the eventual database shape).
 _research_store = ResearchStore()
+
+
+def build_capability_providers(
+    *,
+    search_demand: str | None,
+    marketplace: str | None,
+    public_content: str | None,
+) -> tuple[dict, dict[str, str]]:
+    """Construct the requested providers, reporting the ones that cannot be.
+
+    A capability whose provider cannot even be constructed (missing
+    credentials) is reported as unavailable; it never fails the run. Shared by
+    the cheap pass and the deep pass so the two cannot disagree about what a
+    capability being unavailable means.
+    """
+    unavailable: dict[str, str] = {}
+    providers: dict = {}
+
+    def build(registry: dict, key: str | None, capability: str):
+        if key is None:
+            return None
+        provider_cls = registry.get(key)
+        if provider_cls is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"unknown {capability} provider '{key}'; "
+                    f"available: {sorted(registry)}"
+                ),
+            )
+        try:
+            return provider_cls()
+        except MissingCredentialsError as exc:
+            unavailable[capability] = f"{type(exc).__name__}: {exc}"
+            return None
+
+    for registry, key, capability in (
+        (SEARCH_DEMAND_PROVIDERS, search_demand, CAPABILITY_SEARCH_DEMAND),
+        (MARKETPLACE_PROVIDERS, marketplace, CAPABILITY_MARKETPLACE),
+        (PUBLIC_CONTENT_PROVIDERS, public_content, CAPABILITY_PUBLIC_CONTENT),
+    ):
+        built = build(registry, key, capability)
+        if built is not None:
+            providers[capability] = built
+    return providers, unavailable
 
 
 def get_research_store() -> ResearchStore:
@@ -1800,34 +1857,14 @@ async def research_preliminary(
         candidates = candidates_or_none
         research_run_id = request.research_run_id
 
-    # A capability whose provider cannot even be constructed (missing
-    # credentials) is reported as unavailable; it never fails the run.
-    unavailable: dict[str, str] = {}
-
-    def build(registry: dict, key: str | None, capability: str):
-        if key is None:
-            return None
-        provider_cls = registry.get(key)
-        if provider_cls is None:
-            raise HTTPException(
-                status_code=422,
-                detail=f"unknown {capability} provider '{key}'; available: {sorted(registry)}",
-            )
-        try:
-            return provider_cls()
-        except MissingCredentialsError as exc:
-            unavailable[capability] = f"{type(exc).__name__}: {exc}"
-            return None
-
-    search_provider = build(
-        SEARCH_DEMAND_PROVIDERS, request.search_demand_provider, CAPABILITY_SEARCH_DEMAND
+    providers, unavailable = build_capability_providers(
+        search_demand=request.search_demand_provider,
+        marketplace=request.marketplace,
+        public_content=request.public_content_provider,
     )
-    marketplace_provider = build(
-        MARKETPLACE_PROVIDERS, request.marketplace, CAPABILITY_MARKETPLACE
-    )
-    content_provider = build(
-        PUBLIC_CONTENT_PROVIDERS, request.public_content_provider, CAPABILITY_PUBLIC_CONTENT
-    )
+    search_provider = providers.get(CAPABILITY_SEARCH_DEMAND)
+    marketplace_provider = providers.get(CAPABILITY_MARKETPLACE)
+    content_provider = providers.get(CAPABILITY_PUBLIC_CONTENT)
 
     result = await run_preliminary_research(
         candidates=candidates,
@@ -2321,11 +2358,351 @@ class ProductJobFitOut(BaseModel):
         )
 
 
+SPECIFICATION_SCORED_BOUNDARY = (
+    "This specification was generated for a candidate that carries an "
+    "Opportunity Score. The score describes the evidence behind the "
+    "opportunity, never a forecast that this product will sell."
+)
+
+SPECIFICATION_UNSCORED_BOUNDARY = (
+    "This specification was generated from inline evidence supplied in the "
+    "request, outside any research run. No Opportunity Score, Evidence "
+    "Confidence or classification applies to it, and it must not be presented "
+    "as a scored result."
+)
+
+
+class ScoringOut(BaseModel):
+    """One candidate's Step 8/9 record, exactly as SPEC_STEP_7_8.md §10 states it.
+
+    A null score, confidence or classification is an absence of measurement.
+    None of them is ever a zero, and an absent classification is never RED.
+    """
+
+    scoring_state: str
+    state_boundary: str
+    opportunity_score: float | None
+    evidence_confidence: float | None
+    classification: str | None
+    sub_scores: list[dict]
+    excluded_dimensions: list[dict]
+    kill_rules_triggered: list[str]
+    pos_version: str
+    ecs_version: str
+    threshold_set_version: str
+    limitations: list[str]
+
+    @classmethod
+    def from_result(cls, result: ScoringResult) -> "ScoringOut":
+        return cls(
+            scoring_state=result.scoring_state.value,
+            state_boundary=result.state_boundary,
+            opportunity_score=result.opportunity_score,
+            evidence_confidence=result.evidence_confidence,
+            classification=(
+                result.classification.value if result.classification else None
+            ),
+            sub_scores=[
+                {
+                    "name": s.name.value,
+                    "source_dimension": s.source_dimension.value,
+                    "state": s.state.value,
+                    "value": s.value,
+                    "blocked_reason": s.blocked_reason,
+                    "inputs": [
+                        {"statistic": k, "observed": v, "normalized": n}
+                        for (k, v), (_, n) in zip(
+                            s.inputs, s.normalized_inputs, strict=True
+                        )
+                    ],
+                    "version": s.version,
+                }
+                for s in result.sub_scores
+            ],
+            excluded_dimensions=[
+                {"dimension": name, "reason": reason}
+                for name, reason in result.excluded_dimensions
+            ],
+            kill_rules_triggered=list(result.kill_rules_triggered),
+            pos_version=result.pos_version,
+            ecs_version=result.ecs_version,
+            threshold_set_version=result.threshold_set_version,
+            limitations=list(result.limitations),
+        )
+
+
+class ContextualEvidenceOut(BaseModel):
+    """Evidence surfaced beside a score and never inside one."""
+
+    dimension_name: str
+    state: str
+    missing_reason: str | None
+    observed_features: dict
+    contextual_only: bool
+    formula_version: str
+
+    @classmethod
+    def from_context(cls, context: ContextualEvidence) -> "ContextualEvidenceOut":
+        return cls(
+            dimension_name=context.dimension_name,
+            state=context.state,
+            missing_reason=context.missing_reason,
+            observed_features=context.observed_features,
+            contextual_only=context.contextual_only,
+            formula_version=context.formula_version,
+        )
+
+
+class DeepDimensionOut(BaseModel):
+    dimension_name: str
+    state: str
+    missing_reason: str | None
+    observed_features: dict
+    truth_basis: str | None
+    evidence_ids: list[UUID]
+    formula_version: str
+    conflict_count: int
+    sample_size: int | None
+    required: bool
+    contextual_only: bool
+    pos_eligible: bool
+
+
+class WorkflowCandidateOut(BaseModel):
+    candidate_id: UUID
+    research_run_id: UUID
+    deep_pass_id: UUID
+    stage: str
+    dossier_state: str
+    dossier_state_boundary: str
+    dimensions: list[DeepDimensionOut]
+    scoring: ScoringOut
+    context: list[ContextualEvidenceOut]
+    may_generate_product: bool
+    # Why this candidate carries no score, when it carries none.
+    unscoreable_reason: str | None
+    evidence_ids: list[UUID]
+    limitations: list[str]
+
+    @classmethod
+    def from_result(cls, result: CandidateWorkflowResult) -> "WorkflowCandidateOut":
+        return cls(
+            candidate_id=result.candidate_id,
+            research_run_id=result.research_run_id,
+            deep_pass_id=result.deep_pass_id,
+            stage=result.stage.value,
+            dossier_state=result.dossier.state.value,
+            dossier_state_boundary=result.dossier.state_boundary,
+            dimensions=[
+                DeepDimensionOut(
+                    dimension_name=d.dimension_name,
+                    state=d.state.value,
+                    missing_reason=d.missing_reason,
+                    observed_features=d.observed_features,
+                    truth_basis=d.truth_basis.value if d.truth_basis else None,
+                    evidence_ids=list(d.evidence_ids),
+                    formula_version=d.formula_version,
+                    conflict_count=d.conflict_count,
+                    sample_size=d.sample_size,
+                    required=d.required,
+                    contextual_only=d.contextual_only,
+                    pos_eligible=d.pos_eligible,
+                )
+                for d in result.dossier.dimensions.values()
+            ],
+            scoring=ScoringOut.from_result(result.scoring),
+            context=[ContextualEvidenceOut.from_context(c) for c in result.context],
+            may_generate_product=result.may_generate_product,
+            unscoreable_reason=unscoreable_reason(result),
+            evidence_ids=list(result.dossier.evidence_ids),
+            limitations=list(result.limitations),
+        )
+
+
+class DeepResearchRunResponse(BaseModel):
+    research_run_id: UUID
+    deep_pass_id: UUID
+    candidates: list[WorkflowCandidateOut]
+    scored_candidate_ids: list[UUID]
+    capabilities: list[CapabilityOutcomeOut]
+    true_cache_hits: int
+    depth_misses: int
+    component_versions: dict[str, str]
+
+    @classmethod
+    def from_result(cls, result: DeepResearchRunResult) -> "DeepResearchRunResponse":
+        return cls(
+            research_run_id=result.research_run_id,
+            deep_pass_id=result.deep_pass_id,
+            candidates=[
+                WorkflowCandidateOut.from_result(c) for c in result.candidates
+            ],
+            scored_candidate_ids=list(result.scored_candidate_ids),
+            capabilities=[
+                CapabilityOutcomeOut.from_outcome(o) for o in result.collection.capabilities
+            ],
+            true_cache_hits=result.collection.true_cache_hits,
+            depth_misses=result.collection.depth_misses,
+            component_versions=result.component_versions,
+        )
+
+
 class ProductSpecificationResponse(BaseModel):
     specification: ProductSpecificationOut
     # Milestone 4G: structural fit between the specification and the job its
     # own evidence supports. Never product-market fit.
     product_job_fit: ProductJobFitOut
+    # The score this specification was generated behind. Null ONLY for the
+    # inline-candidate mode, which bypasses the store and therefore cannot be
+    # part of a scored workflow; stated rather than omitted so an inline
+    # specification can never be mistaken for a scored one.
+    scoring: ScoringOut | None = None
+    scoring_boundary: str
+
+
+class DeepResearchRunRequest(BaseModel):
+    """Run Step 7 to Step 9 for selected candidates of one research run."""
+
+    research_run_id: UUID
+    # The candidates selected for deep research. Explicit rather than derived
+    # from a preliminary rank: triage policy must not cross into scoring.
+    candidate_ids: list[UUID]
+    search_demand_provider: str | None = None
+    marketplace: str | None = None
+    public_content_provider: str | None = None
+    location: str = "US"
+    language: str = "en"
+
+
+class ContentPlanRequest(BaseModel):
+    research_run_id: UUID
+    candidate_id: UUID
+
+
+class ContentPlanResponse(BaseModel):
+    candidate_id: UUID
+    research_run_id: UUID
+    outlier_state: str
+    patterns_state: str
+    experiments_state: str
+    experiments: list[dict]
+    limitations: list[str]
+
+
+@router.post("/workflow/deep-research", response_model=DeepResearchRunResponse)
+async def workflow_deep_research(
+    request: DeepResearchRunRequest,
+    store: ResearchStore = Depends(get_research_store),
+) -> DeepResearchRunResponse:
+    """Steps 7-9 for the selected candidates: deep collection, dossier,
+    Evidence Confidence, POS sub-scores, candidate score, classification.
+
+    Every scoring record is persisted, including the candidates that could not
+    be scored: knowing how good the evidence was matters most when it was not
+    good enough to score.
+    """
+    candidates = store.get_run_candidates(request.research_run_id)
+    if candidates is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"research run {request.research_run_id} not found",
+        )
+    by_id = {c.id: c for c in candidates}
+    missing = [str(cid) for cid in request.candidate_ids if cid not in by_id]
+    if missing:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"candidates {', '.join(missing)} are not part of research run "
+                f"{request.research_run_id}"
+            ),
+        )
+    selected = [by_id[cid] for cid in request.candidate_ids]
+
+    providers, unavailable = build_capability_providers(
+        search_demand=request.search_demand_provider,
+        marketplace=request.marketplace,
+        public_content=request.public_content_provider,
+    )
+    result = await run_deep_research_and_score(
+        candidates=selected,
+        store=store,
+        research_run_id=request.research_run_id,
+        search_demand_provider=providers.get(CAPABILITY_SEARCH_DEMAND),
+        marketplace_provider=providers.get(CAPABILITY_MARKETPLACE),
+        public_content_provider=providers.get(CAPABILITY_PUBLIC_CONTENT),
+        location=request.location,
+        language=request.language,
+        unavailable_capabilities=unavailable,
+    )
+    return DeepResearchRunResponse.from_result(result)
+
+
+@router.get(
+    "/workflow/runs/{research_run_id}/candidates/{candidate_id}",
+    response_model=dict,
+)
+def workflow_candidate_state(
+    research_run_id: UUID,
+    candidate_id: UUID,
+    store: ResearchStore = Depends(get_research_store),
+) -> dict:
+    """How far one candidate has reached, without running anything.
+
+    A null stage means deep research has not run for it. That is the absence
+    of an attempt and says nothing about the candidate.
+    """
+    stage, scoring = workflow_state(store, candidate_id, research_run_id)
+    return {
+        "candidate_id": str(candidate_id),
+        "research_run_id": str(research_run_id),
+        "stage": stage.value if stage else None,
+        "scoring": ScoringOut.from_result(scoring).model_dump() if scoring else None,
+    }
+
+
+@router.post("/workflow/content-plan", response_model=ContentPlanResponse)
+def workflow_content_plan(
+    request: ContentPlanRequest,
+    store: ResearchStore = Depends(get_research_store),
+) -> ContentPlanResponse:
+    """5A, then 5B, then 5C for one scored candidate.
+
+    Post-score by the same rule product generation follows. The experiments
+    returned are hypotheses to test, never predictions of performance.
+    """
+    try:
+        derived = derive_content_plan(store, request.candidate_id, request.research_run_id)
+    except WorkflowGateError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"reason": exc.reason, "message": exc.detail},
+        ) from exc
+    experiments = derived.experiments
+    return ContentPlanResponse(
+        candidate_id=derived.candidate_id,
+        research_run_id=derived.research_run_id,
+        outlier_state=derived.outliers.state.value,
+        patterns_state=derived.patterns.state.value,
+        experiments_state=experiments.state.value,
+        experiments=[
+            {
+                "experiment_id": e.experiment_id,
+                "title": e.title,
+                "hypothesis": e.hypothesis,
+                # The manipulated variable, stated as 5C canonicalized it.
+                "variable_family": e.variable_family.value,
+                "variable_kind": e.variable_kind.value,
+                "variable_value": e.variable_value,
+                "baseline_state": e.baseline_state.value,
+                "baseline_definition": e.baseline_definition,
+                "primary_measurement": e.primary_measurement,
+                "success_criterion": e.success_criterion,
+            }
+            for e in experiments.experiments
+        ],
+        limitations=list(experiments.limitations),
+    )
 
 
 @router.post("/product/specification", response_model=ProductSpecificationResponse)
@@ -2338,6 +2715,7 @@ def product_specification(
     Deterministic: no provider calls, no LLM, no score, and no fabricated
     demand. Evidence that does not exist stays UNKNOWN or MISSING.
     """
+    scoring: ScoringResult | None = None
     if request.candidate is not None:
         candidate = request.candidate
         evidence = list(request.evidence or [])
@@ -2367,6 +2745,17 @@ def product_specification(
         # so an unscoped read would mix runs and double-count any listing
         # observed in more than one of them.
         research_run_id = request.research_run_id
+        # Step 8 before step 10. A specification is generated only for a
+        # candidate that carries an actual score; an unscoreable candidate is
+        # unmeasured, not rejected, and the refusal says which evidence was
+        # missing rather than implying a verdict.
+        try:
+            scoring = require_scored_candidate(store, candidate.id, research_run_id)
+        except WorkflowGateError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": exc.reason, "message": exc.detail},
+            ) from exc
         evidence = store.evidence_for_candidate(candidate.id, research_run_id)
 
     # 4A/4B are re-derived from the same stored evidence so the specification
@@ -2416,6 +2805,12 @@ def product_specification(
             limitations=FIT_LIMITATIONS,
         )
     return ProductSpecificationResponse(
+        scoring=ScoringOut.from_result(scoring) if scoring else None,
+        scoring_boundary=(
+            SPECIFICATION_SCORED_BOUNDARY
+            if scoring
+            else SPECIFICATION_UNSCORED_BOUNDARY
+        ),
         specification=ProductSpecificationOut.from_specification(specification),
         product_job_fit=ProductJobFitOut.from_result(fit),
     )
