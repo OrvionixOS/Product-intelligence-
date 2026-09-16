@@ -387,7 +387,9 @@ def test_deep_search_demand_emits_a_distribution_never_a_single_value():
     )
     demand = dimension(result, EcsDimension.SEARCH_DEMAND)
     assert demand.state is DimensionState.EVIDENCE_PRESENT_UNSCORED
-    assert demand.observed_features["median_observed_search_volume"] == 200
+    assert demand.observed_features["q25_search_volume"] == 150
+    assert demand.observed_features["median_search_volume"] == 200
+    assert demand.observed_features["q75_search_volume"] == 250
     assert demand.observed_features["keywords_measured"] == 3
     assert demand.observed_features["keywords_queried"] == 3
     assert demand.formula_version == DEEP_SEARCH_DEMAND_VERSION
@@ -406,7 +408,7 @@ def test_a_queried_keyword_with_no_measurement_is_unknown_not_zero():
     assert demand.state is DimensionState.UNKNOWN
     assert demand.observed_features["keywords_queried"] == 1
     assert demand.observed_features["keywords_measured"] == 0
-    assert "median_observed_search_volume" not in demand.observed_features
+    assert "median_search_volume" not in demand.observed_features
 
 
 def test_an_observed_zero_volume_is_a_real_measurement():
@@ -417,7 +419,7 @@ def test_an_observed_zero_volume_is_a_real_measurement():
     )
     demand = dimension(result, EcsDimension.SEARCH_DEMAND)
     assert demand.state is DimensionState.EVIDENCE_PRESENT_UNSCORED
-    assert demand.observed_features["median_observed_search_volume"] == 0
+    assert demand.observed_features["median_search_volume"] == 0
     assert demand.observed_features["keywords_measured"] == 1
     assert demand.sample_size == 1
 
@@ -485,7 +487,7 @@ def test_two_observed_volumes_for_one_keyword_conflict():
     demand = dimension(result, EcsDimension.SEARCH_DEMAND)
     assert demand.conflict_count == 2
     # Excluded from the median, never averaged away.
-    assert demand.observed_features["median_observed_search_volume"] == 200
+    assert demand.observed_features["median_search_volume"] == 200
     assert demand.observed_features["keywords_measured"] == 1
 
 
@@ -502,7 +504,7 @@ def test_an_identical_repeat_observation_is_a_duplicate_not_a_conflict():
     )
     demand = dimension(result, EcsDimension.SEARCH_DEMAND)
     assert demand.conflict_count == 0
-    assert demand.observed_features["median_observed_search_volume"] == 100
+    assert demand.observed_features["median_search_volume"] == 100
 
 
 def test_an_unknown_record_never_conflicts_with_an_observed_one():

@@ -615,3 +615,52 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   one is a documented equivalent mutant — a redundant re-sort of dimension
   evidence ids, kept as defence in depth because every current derivation
   already sorts its own provenance
+
+### Milestones 6D–6G — POS sub-scores, candidate score, persistence, classification (implemented)
+- Four named, versioned, **explicitly uncalibrated** V1 policy sets, adopted by
+  decision and calibrated against no outcome data: `pos_search_demand_v1`,
+  `pos_purchase_proxy_v1`, `pos_audience_attention_v1` (U-1),
+  `opportunity_score_v1` (U-2) and `classification_thresholds_v1` (U-3). Every
+  scoring record carries all three version strings
+- **6D.** Each sub-score is the mean of three normalized statistics, rounded to
+  2dp. The scales are `100·log10(v+1)/5`, `/3` and `/6`, saturating at 100,000
+  searches, 1,000 reviews and 1,000,000 views. D1 gained Q25/Q75 from the same
+  deterministic quantile function 4A and 4F already share, so "Q25" means one
+  thing across dimensions. The `+1` shifts each curve by one unit, so the first
+  input reaching 100 is one below the stated point — recorded rather than
+  rounded over
+- **Missing never becomes zero.** A MISSING or UNKNOWN dimension, or one whose
+  required statistic was never reported, BLOCKS its sub-score: `None` with a
+  reason naming the statistic, never `0.0`. An observed zero is a real
+  measurement and scores 0 on its own scale — `log10(0+1)=0` is a score, not an
+  absence. A negative count is refused rather than clamped, because silently
+  reading one as 0 would hide an upstream defect
+- **6E.** `opportunity_score_v1` is the equal-weight mean of all three
+  sub-scores. No renormalization path exists, guarded twice on purpose: the
+  legacy `weighted_opportunity_score` renormalized over whichever weights were
+  present, which is how a candidate missing most of its evidence could score 80
+- **6F.** The schema migration makes score, confidence and classification
+  nullable, adds `scoring_state`, `excluded_dimensions` and the three version
+  columns, and constrains the state to §10's four values. **Nothing is
+  back-filled** — no value could honestly stand for a score never computed —
+  and `scoring_state` defaults to `NOT_SCORED`, which is the one truthful thing
+  to say about a row written under the old contract. Check constraints mirror
+  the invariants, and `ScoringResult.__post_init__` enforces the same ones at
+  construction, so a record that cannot be built wrongly cannot be persisted
+  wrongly. Scoring records are append-only and scope-keyed, so a rescore never
+  destroys what an earlier one recorded
+- **6G.** `classification_thresholds_v1`: ECS floor 60, then POS <40 RED,
+  40–70 YELLOW, ≥70 GREEN. **Below the floor is not a colour** — a GREEN-range
+  score on thin, stale, unrecognised-provenance evidence gets
+  SCORED_UNCLASSIFIED and no colour, proved through the real pipeline (POS
+  72.38, ECS 53.62). A blocked ECS never clears the floor: absence is not a
+  passing value. V1 triggers no kill rules and revives none of the rejected
+  legacy ones
+- `POST /score` remains 410 and legacy scoring stays quarantined: §12 retains
+  that unchanged and §15 does not place activation in 6G. The new scoring is
+  not wired into any route
+- 39 mutations of the milestones' boundaries were applied; 37 were killed and
+  two are documented equivalent mutants — the deliberately redundant pair of
+  guards against a short mean, where either alone prevents the defect. One real
+  test gap was found and fixed first: the schema-constraint test matched the
+  preceding `drop constraint` line, so renaming the `add constraint` passed

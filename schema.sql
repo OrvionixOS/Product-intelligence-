@@ -165,6 +165,18 @@ create table if not exists public_content_video_observations (
   created_at timestamptz not null default now()
 );
 
+-- Milestone 6F. SPEC_STEP_7_8.md section 10.
+--
+-- The original shape could not represent any state the system actually
+-- produces. `opportunity_score`, `evidence_confidence` and `classification`
+-- were all NOT NULL, and classification was constrained to RED/YELLOW/GREEN,
+-- while every derivation since 4A returns EVIDENCE_PRESENT_UNSCORED with no
+-- value at all. A row could therefore only be written by inventing numbers,
+-- which is the one thing this system must never do.
+--
+-- Nothing is back-filled. There is no value that could honestly stand in for
+-- a score that was never computed, so existing rows keep what they have and
+-- new rows record an explicit state instead.
 create table if not exists score_versions (
   id uuid primary key default gen_random_uuid(),
   opportunity_id uuid not null references opportunities(id) on delete cascade,
@@ -178,6 +190,81 @@ create table if not exists score_versions (
   kill_rules_triggered jsonb not null default '[]'::jsonb,
   calculated_at timestamptz not null default now()
 );
+
+-- Migration: make the results nullable and add the explicit state.
+--
+-- `scoring_state` is added with a default of NOT_SCORED so existing rows get
+-- a truthful value without anyone guessing what they meant: a row written
+-- under the old contract has no recorded state, and NOT_SCORED says exactly
+-- that rather than claiming it was classified.
+alter table score_versions
+  add column if not exists scoring_state text not null default 'NOT_SCORED';
+
+alter table score_versions
+  add column if not exists excluded_dimensions jsonb not null default '[]'::jsonb;
+
+alter table score_versions
+  add column if not exists pos_version text;
+
+alter table score_versions
+  add column if not exists ecs_version text;
+
+alter table score_versions
+  add column if not exists threshold_set_version text;
+
+alter table score_versions
+  add column if not exists candidate_id uuid references candidates(id) on delete cascade;
+
+alter table score_versions
+  add column if not exists research_run_id uuid references research_runs(id) on delete cascade;
+
+alter table score_versions alter column opportunity_score drop not null;
+alter table score_versions alter column evidence_confidence drop not null;
+alter table score_versions alter column classification drop not null;
+alter table score_versions alter column feature_vector drop not null;
+alter table score_versions alter column scoring_version drop not null;
+alter table score_versions alter column confidence_version drop not null;
+alter table score_versions alter column opportunity_id drop not null;
+
+alter table score_versions
+  drop constraint if exists score_versions_classification_check;
+
+-- The four states of section 10, and nothing else.
+alter table score_versions
+  drop constraint if exists score_versions_scoring_state_check;
+alter table score_versions
+  add constraint score_versions_scoring_state_check
+  check (scoring_state in (
+    'NOT_SCORED', 'INSUFFICIENT_EVIDENCE', 'SCORED_UNCLASSIFIED', 'CLASSIFIED'
+  ));
+
+-- A colour is still only ever one of three, and only ever present when the
+-- state says a colour exists. Absence is representable; a wrong colour is not.
+alter table score_versions
+  drop constraint if exists score_versions_classification_values_check;
+alter table score_versions
+  add constraint score_versions_classification_values_check
+  check (classification is null or classification in ('RED','YELLOW','GREEN'));
+
+-- The state and the results cannot disagree. These are the invariants section
+-- 10 states in prose, enforced where a row is written rather than trusted.
+alter table score_versions
+  drop constraint if exists score_versions_state_consistency_check;
+alter table score_versions
+  add constraint score_versions_state_consistency_check
+  check (
+    -- A score exists only in the two scored states.
+    (opportunity_score is not null)
+      = (scoring_state in ('SCORED_UNCLASSIFIED', 'CLASSIFIED'))
+    -- A colour exists only when classified.
+    and (classification is not null) = (scoring_state = 'CLASSIFIED')
+    -- A classified row always has the confidence that let it be classified.
+    and (scoring_state <> 'CLASSIFIED' or evidence_confidence is not null)
+  );
+
+create index if not exists idx_scores_state on score_versions(scoring_state);
+create index if not exists idx_scores_candidate_run
+  on score_versions(candidate_id, research_run_id);
 
 create index if not exists idx_opportunities_research_run on opportunities(research_run_id);
 create index if not exists idx_candidates_seed_keyword on candidates(seed_keyword);

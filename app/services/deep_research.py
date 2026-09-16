@@ -35,7 +35,6 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import datetime
 from enum import Enum
-from statistics import median
 from uuid import UUID
 
 from app.domain.enums import TruthClass
@@ -43,6 +42,7 @@ from app.domain.models import EvidenceItem
 from app.services.audience_attention import extract_audience_attention
 from app.services.buyer_reach import extract_buyer_reach
 from app.services.competition_opportunity import extract_competition_opportunity
+from app.services.marketplace_listing_view import quantile
 from app.services.evidence_confidence import (
     DIMENSION_CAPABILITIES,
     REQUIRED_DIMENSIONS,
@@ -404,9 +404,15 @@ def _deep_search_demand(
             "keywords_measured": 0,
         }
     else:
+        # All three quartiles come from the one deterministic quantile function
+        # 4A and 4F already share, so "Q25" means the same thing in every
+        # dimension rather than depending on which module computed it. Rounded
+        # to 4dp exactly as those two do.
         state = DimensionState.EVIDENCE_PRESENT_UNSCORED
         features = {
-            "median_observed_search_volume": median(volumes),
+            "q25_search_volume": round(quantile(volumes, 0.25), 4),
+            "median_search_volume": round(quantile(volumes, 0.5), 4),
+            "q75_search_volume": round(quantile(volumes, 0.75), 4),
             "keywords_queried": keywords_queried,
             "keywords_measured": keywords_measured,
             "lowest_observed_search_volume": volumes[0],
