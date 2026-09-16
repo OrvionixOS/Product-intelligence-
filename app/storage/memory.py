@@ -6,13 +6,52 @@ updated or deleted, so historical evidence cannot be overwritten. schema.sql
 documents the eventual Postgres shape of the same data.
 """
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
+from typing import Generic, TypeVar
 from uuid import UUID
 
 from app.domain.models import Candidate, EvidenceItem, EvidenceSnapshot
 from app.providers.base import KeywordDemandMetrics, MarketplaceListing, VideoObservation
 
 DEFAULT_CACHE_TTL = timedelta(days=7)
+
+T = TypeVar("T")
+
+
+class CacheOutcome(str, Enum):
+    """Why a result-count-limited cache lookup did or did not serve a request.
+
+    SPEC_STEP_7_8.md §1.1: a deep pass must never treat a result collected
+    under a smaller effective limit as satisfying a larger request. The three
+    outcomes are kept distinct because a DEPTH_MISS looks exactly like a HIT
+    from the outside -- an entry was present -- and counting it as one would
+    hide the failure the rule exists to prevent.
+    """
+
+    # Entry present and collected at least as deep as this request.
+    HIT = "HIT"
+    # Entry present but collected under a smaller limit. Re-fetch, never reuse.
+    # Not an error: this is the normal cost of going deeper.
+    DEPTH_MISS = "DEPTH_MISS"
+    # No entry, or the entry expired.
+    MISS = "MISS"
+
+
+@dataclass(slots=True, frozen=True)
+class CacheLookup(Generic[T]):
+    """The result of a limit-aware cache read."""
+
+    outcome: CacheOutcome
+    # Populated only on HIT. A DEPTH_MISS deliberately yields nothing: fewer
+    # cached results is a property of the earlier budget, never an observation
+    # about the field, so the shallow set must not leak into a deep pass.
+    items: list[T] | None = None
+    # What limit the stored entry was collected under. Present on HIT and
+    # DEPTH_MISS, so a reuse decision is auditable against the budget that
+    # authorized it.
+    cached_effective_limit: int | None = None
 
 
 class ImmutableEvidenceError(RuntimeError):
@@ -30,8 +69,14 @@ class ResearchStore:
         self._evidence_by_snapshot: dict[UUID, list[UUID]] = {}
         self._evidence_by_candidate: dict[UUID, list[UUID]] = {}
         self._keyword_cache: dict[tuple[str, str, str, str], tuple[datetime, KeywordDemandMetrics]] = {}
-        self._listing_cache: dict[tuple[str, str], tuple[datetime, list[MarketplaceListing]]] = {}
-        self._video_cache: dict[tuple[str, str], tuple[datetime, list[VideoObservation]]] = {}
+        # Result-count-limited caches also store the effective limit each entry
+        # was collected under (§1.1 rule 1).
+        self._listing_cache: dict[
+            tuple[str, str], tuple[datetime, list[MarketplaceListing], int]
+        ] = {}
+        self._video_cache: dict[
+            tuple[str, str], tuple[datetime, list[VideoObservation], int]
+        ] = {}
         self._cache_ttl = cache_ttl
 
     # ------------------------------------------------------------- research runs
@@ -127,30 +172,80 @@ class ResearchStore:
 
     # -------------------------------------------------- marketplace listing cache
 
-    def cached_listings(self, provider: str, query: str) -> list[MarketplaceListing] | None:
-        entry = self._listing_cache.get((provider, query))
-        if entry is None:
-            return None
-        stored_at, listings = entry
-        if datetime.now(UTC) - stored_at > self._cache_ttl:
-            return None
-        return list(listings)
+    def cached_listings(
+        self, provider: str, query: str, requested_limit: int
+    ) -> CacheLookup[MarketplaceListing]:
+        """Read the listing cache, honouring §1.1 depth semantics."""
+        return _limit_aware_lookup(
+            self._listing_cache.get((provider, query)), requested_limit, self._cache_ttl
+        )
 
     def cache_listings(
-        self, provider: str, query: str, listings: list[MarketplaceListing]
+        self,
+        provider: str,
+        query: str,
+        listings: list[MarketplaceListing],
+        effective_limit: int,
     ) -> None:
-        self._listing_cache[(provider, query)] = (datetime.now(UTC), list(listings))
+        """Store listings with the limit they were collected under.
+
+        `effective_limit` is what was REQUESTED, not how many came back. A
+        query that returns three results under a limit of fifty was still
+        collected deeply; recording three would make the next deep request a
+        spurious depth miss, and would quietly turn a budget fact into a claim
+        about the field.
+        """
+        # §1.1 rule 4: re-fetching replaces the entry, so a later shallow
+        # request reuses it correctly and a later deeper one still misses.
+        self._listing_cache[(provider, query)] = (
+            datetime.now(UTC),
+            list(listings),
+            effective_limit,
+        )
 
     # ------------------------------------------------- public-content video cache
 
-    def cached_videos(self, provider: str, query: str) -> list[VideoObservation] | None:
-        entry = self._video_cache.get((provider, query))
-        if entry is None:
-            return None
-        stored_at, videos = entry
-        if datetime.now(UTC) - stored_at > self._cache_ttl:
-            return None
-        return list(videos)
+    def cached_videos(
+        self, provider: str, query: str, requested_limit: int
+    ) -> CacheLookup[VideoObservation]:
+        """Read the video cache, honouring §1.1 depth semantics."""
+        return _limit_aware_lookup(
+            self._video_cache.get((provider, query)), requested_limit, self._cache_ttl
+        )
 
-    def cache_videos(self, provider: str, query: str, videos: list[VideoObservation]) -> None:
-        self._video_cache[(provider, query)] = (datetime.now(UTC), list(videos))
+    def cache_videos(
+        self,
+        provider: str,
+        query: str,
+        videos: list[VideoObservation],
+        effective_limit: int,
+    ) -> None:
+        """Store videos with the limit they were collected under."""
+        self._video_cache[(provider, query)] = (
+            datetime.now(UTC),
+            list(videos),
+            effective_limit,
+        )
+
+
+def _limit_aware_lookup(
+    entry: tuple[datetime, list[T], int] | None,
+    requested_limit: int,
+    cache_ttl: timedelta,
+) -> CacheLookup[T]:
+    """§1.1 rule 2: reuse requires cached_effective_limit >= requested."""
+    if entry is None:
+        return CacheLookup(outcome=CacheOutcome.MISS)
+    stored_at, items, cached_effective_limit = entry
+    if datetime.now(UTC) - stored_at > cache_ttl:
+        return CacheLookup(outcome=CacheOutcome.MISS)
+    if cached_effective_limit < requested_limit:
+        return CacheLookup(
+            outcome=CacheOutcome.DEPTH_MISS,
+            cached_effective_limit=cached_effective_limit,
+        )
+    return CacheLookup(
+        outcome=CacheOutcome.HIT,
+        items=list(items),
+        cached_effective_limit=cached_effective_limit,
+    )

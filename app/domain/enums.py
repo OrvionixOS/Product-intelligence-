@@ -47,3 +47,14 @@ class SnapshotStatus(str, Enum):
     COMPLETE = "COMPLETE"
     PARTIAL = "PARTIAL"
     FAILED = "FAILED"
+
+
+# ------------------------------------------------------- collection methods
+#
+# The vocabulary of `EvidenceItem.collection_method`. Defined here, in the
+# domain that owns the field, so every capability and Evidence Confidence
+# agree on the spelling: `provenance_directness_v1` maps exactly these values,
+# and a divergent spelling would silently score reused evidence as a direct
+# API observation.
+COLLECTION_METHOD_OFFICIAL_API = "official_api"
+COLLECTION_METHOD_CACHE = "cache"

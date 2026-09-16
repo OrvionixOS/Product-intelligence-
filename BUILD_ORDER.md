@@ -504,14 +504,11 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   (DETERMINISTIC_DERIVATION, INDIRECT_PROVIDER_MEDIATED) are approved policy
   with no current production producer; a test records them as
   declared-but-unproduced rather than letting the table look fully exercised
-- `VALIDATED_CACHE` is reachable today from search demand alone, which is the
-  only path emitting `collection_method="cache"`. Marketplace and public
-  content pass the provider's own collection method through even on cache
-  reuse, so their cache hits currently score as direct API observations — an
-  OVER-credit. Explicit cache provenance is 6B's responsibility (§1.1); until
-  it lands, `provenance_directness` is an upper bound for those two
-  capabilities. A test pins which modules emit it, so it fails the moment 6B
-  changes that
+- `VALIDATED_CACHE` was reachable from search demand alone when 6A-1 shipped;
+  marketplace and public content passed the provider's own collection method
+  through even on cache reuse, so their cache hits scored as direct API
+  observations — an OVER-credit. **Closed by 6B**, which makes all three state
+  reuse; the 6A-1 test that pinned the gap now pins its closure
 - Boundary guards scan executed symbols via the AST, not raw file text. A text
   scan reads this module's own refusals ("no POS, no weights, no
   RED/YELLOW/GREEN") as violations, and `PROVENANCE_DIRECTNESS` contains the
@@ -519,3 +516,55 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
 - No POS, no `/score` activation, no deep collection, no new endpoint, no
   schema change. Legacy `app/services/scoring.py` remains quarantined
 - 35 mutations of the milestone's boundaries were applied; all 35 were killed
+
+### Milestone 6B — Deep collection, Step 7a (implemented)
+- `app/services/deep_collection.py` re-runs the same three approved
+  capabilities over the selected candidates at raised caps, through the
+  `CapabilityCaps` seam that already existed. No new provider, no new external
+  dependency, no new endpoint, no derivation — 7b belongs to 6C
+- `deep_pass_caps_v1` (U-6) supplies all eight cap fields as a NAMED,
+  VERSIONED, **explicitly uncalibrated** V1 collection budget, recorded on
+  every result so evidence stays attributable to the budget that authorized
+  it. A `None` anywhere would silently fall back to a cheap-pass default and
+  make the pass deep in name only, so a test requires all eight
+- One cap reads like a reduction and is not. `max_listings_per_query` (50 vs
+  25) and `max_videos_per_query` (25 vs 10) are PER QUERY and compare
+  directly. Every other cap is a whole-pass budget, and the passes cover
+  different candidate counts: `max_keywords` at 100 is a smaller pass total
+  than the cheap default of 200 and twice the depth per candidate — 100/5 = 20
+  against 200/20 = 10. That is the §1 trade, and comparing pass totals
+  directly reads a deepening as a cut
+- **Limit-aware cache identity (§1.1).** The listing and video caches record
+  the effective limit each entry was collected under, and reuse requires
+  `cached_effective_limit >= requested`. A shallower entry is a DEPTH_MISS and
+  is re-fetched. The stored limit is what was REQUESTED, never how many came
+  back: a query returning three results under a limit of fifty was collected
+  deeply, and recording three would turn a budget fact into a claim about the
+  field. A depth miss yields no items at all, so the shallow set cannot leak
+  into a deep pass as "the cache had fewer, so fewer exist". Re-fetching
+  replaces the entry, so a later shallow request reuses it and a later deeper
+  one still misses. The keyword cache is untouched: depth in search demand
+  means more keywords queried, not more results per keyword
+- **A depth miss is not a cache hit.** They are indistinguishable from
+  outside — an entry was present — so `depth_miss_query_count` is reported
+  separately from `cached_query_count` on every capability outcome and through
+  the API, and a deep pass that looks suspiciously cheap can be diagnosed
+  rather than trusted
+- **Cache reuse is stated in provenance.** All three capabilities now record
+  the shared `COLLECTION_METHOD_CACHE` constant on reused evidence instead of
+  the provider's own method, which fixes the over-credit 6A-1 recorded. A
+  listing or video reached by at least one live fetch IS a live observation,
+  whatever else also returned it; only one seen solely through reused entries
+  is cache-sourced. The constants live in `app/domain/enums.py`, the domain
+  that owns `EvidenceItem.collection_method`, so providers depend on the
+  domain and Evidence Confidence keeps its provider-free boundary
+- No new deduplication rule (§1.1). Cheap and deep passes overlap by
+  construction, and a re-observation produces a byte-identical payload and
+  hash, which the existing 5B fingerprint mechanism already collapses
+- Evidence stays immutable and run-scoped: the deep pass extends the run it is
+  given rather than inventing one, and `research_run_id` is required rather
+  than defaulted. A provider failure degrades only its own capability
+- 23 mutations of the milestone's boundaries were applied; all 23 were killed.
+  One survivor was found and fixed first: nothing asserted that a LIVE
+  public-content fetch keeps the provider's own method, so marking every video
+  record cache-sourced passed

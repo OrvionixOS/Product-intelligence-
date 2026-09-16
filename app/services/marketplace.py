@@ -25,7 +25,12 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from app.domain.enums import EvidencePurpose, SnapshotStatus, TruthClass
+from app.domain.enums import (
+    COLLECTION_METHOD_CACHE,
+    EvidencePurpose,
+    SnapshotStatus,
+    TruthClass,
+)
 from app.domain.models import Candidate, EvidenceItem, EvidenceSnapshot
 from app.providers.base import (
     MarketplaceListing,
@@ -38,7 +43,7 @@ from app.services.marketplace_features import (
     summarize_marketplace,
 )
 from app.services.search_demand import normalize_query
-from app.storage.memory import ResearchStore
+from app.storage.memory import CacheOutcome, ResearchStore
 
 NORMALIZATION_VERSION = "marketplace_norm_v1"
 
@@ -138,7 +143,13 @@ class MarketplaceRunResult:
     evidence_ids_by_candidate: dict[UUID, list[UUID]]
     provider_errors: list[str] = field(default_factory=list)
     missing_queries: list[MissingQuery] = field(default_factory=list)
+    # A true cache hit: entry present AND collected at least as deep as this
+    # request. SPEC_STEP_7_8.md §1.1 forbids counting a depth miss here.
     cached_query_count: int = 0
+    # Entry present but collected under a smaller limit, so it was re-fetched.
+    # Tracked separately so a deep pass that looks suspiciously cheap can be
+    # diagnosed rather than trusted.
+    depth_miss_query_count: int = 0
     unique_listing_count: int = 0
     review_lookups_performed: int = 0
     review_lookups_skipped: int = 0
@@ -154,6 +165,7 @@ def build_listing_evidence(
     reviews_looked_up: bool,
     originating_queries: tuple[str, ...] | None = None,
     originating_query_shared: bool | None = None,
+    collected_live: bool = True,
 ) -> list[EvidenceItem]:
     """Immutable evidence for one (candidate, listing) pair.
 
@@ -172,7 +184,13 @@ def build_listing_evidence(
         research_run_id=research_run_id,
         snapshot_id=snapshot_id,
         provider=provider.name,
-        collection_method=provider.collection_method,
+        # Cache reuse is stated, not hidden behind the provider's own method.
+        # Reporting a reused entry as a live API observation over-credits its
+        # provenance, which Evidence Confidence then reads as directness it
+        # never had (SPEC_STEP_7_8.md §1.1, "interaction with provenance").
+        collection_method=(
+            provider.collection_method if collected_live else COLLECTION_METHOD_CACHE
+        ),
         source_reference=source_reference,
         source_url=listing.url,
         retrieved_at=listing.retrieved_at,
@@ -273,17 +291,25 @@ async def run_marketplace_research(
         missing.append(MissingQuery(query, MISSING_QUERY_CAP, plan.query_to_candidates[query]))
 
     # Cache first: identical (provider, query) result sets within the
-    # freshness window are reused instead of re-fetched.
+    # freshness window are reused instead of re-fetched -- but only when the
+    # entry was collected at least as deep as this request asks for (§1.1).
     listings_by_query: dict[str, list[MarketplaceListing]] = {}
     to_fetch: list[str] = []
     cached_count = 0
+    depth_miss_count = 0
+    reused_queries: set[str] = set()
     for query in requested:
-        cached = store.cached_listings(provider.name, query)
-        if cached is not None:
-            listings_by_query[query] = cached
+        lookup = store.cached_listings(provider.name, query, listings_cap)
+        if lookup.outcome is CacheOutcome.HIT:
+            listings_by_query[query] = lookup.items or []
+            reused_queries.add(query)
             cached_count += 1
-        else:
-            to_fetch.append(query)
+            continue
+        if lookup.outcome is CacheOutcome.DEPTH_MISS:
+            # Shallower than requested. Re-fetch rather than pass the shallow
+            # set off as deep evidence.
+            depth_miss_count += 1
+        to_fetch.append(query)
 
     call_count = 0
     provider_version: str | None = None
@@ -373,6 +399,7 @@ async def run_marketplace_research(
             provider.name,
             query,
             [canonical[listing.listing_id] for listing in listings_by_query[query]],
+            effective_limit=listings_cap,
         )
 
     # Build immutable evidence: price + purchase-proxy + competition records
@@ -380,6 +407,14 @@ async def run_marketplace_research(
     # is identical for every candidate sharing the listing.
     evidence_ids: dict[UUID, list[UUID]] = {c.id: [] for c in candidates}
     listings_by_candidate: dict[UUID, list[MarketplaceListing]] = {c.id: [] for c in candidates}
+    # A listing reached by at least one live fetch in this pass IS a live
+    # observation, whatever else also returned it. Only a listing seen solely
+    # through reused cache entries is cache-sourced.
+    live_listing_ids = {
+        listing.listing_id
+        for query in fetched_queries
+        for listing in listings_by_query.get(query, [])
+    }
     evidence_items: list[EvidenceItem] = []
     for listing_id in listing_order:
         listing = canonical[listing_id]
@@ -402,6 +437,7 @@ async def run_marketplace_research(
                 reviews_looked_up=listing_id in reviews_fetched,
                 originating_queries=originating_queries,
                 originating_query_shared=query_shared,
+                collected_live=listing_id in live_listing_ids,
             )
             evidence_items.extend(items)
             evidence_ids[candidate_id].extend(item.id for item in items)
@@ -445,6 +481,7 @@ async def run_marketplace_research(
         provider_errors=provider_errors,
         missing_queries=missing,
         cached_query_count=cached_count,
+        depth_miss_query_count=depth_miss_count,
         unique_listing_count=len(canonical),
         review_lookups_performed=review_lookups,
         review_lookups_skipped=review_skipped,

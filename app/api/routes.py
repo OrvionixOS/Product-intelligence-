@@ -793,7 +793,12 @@ class CapabilityOutcomeOut(BaseModel):
     quota_units_used: int | None
     quota_units_is_exact: bool | None
     cached_query_count: int
-    failure_reason: str | None
+    # A cache entry that was present but collected under a smaller result
+    # limit, so it was re-fetched rather than reused. Reported separately from
+    # cached_query_count so a pass that looks suspiciously cheap can be
+    # diagnosed (SPEC_STEP_7_8.md §1.1).
+    depth_miss_query_count: int = 0
+    failure_reason: str | None = None
     # True only for a defect outside the provider contract, so a client can
     # distinguish "the provider failed as it may" from "something is broken".
     unexpected_error: bool = False
@@ -813,6 +818,7 @@ class CapabilityOutcomeOut(BaseModel):
             quota_units_used=o.quota_units_used,
             quota_units_is_exact=o.quota_units_is_exact,
             cached_query_count=o.cached_query_count,
+            depth_miss_query_count=o.depth_miss_query_count,
             failure_reason=o.failure_reason,
             unexpected_error=o.status == STATUS_UNEXPECTED_PROVIDER_ERROR,
         )
