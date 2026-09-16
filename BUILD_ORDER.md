@@ -710,3 +710,34 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   empty — which satisfied a disjointness assertion vacuously while the second
   run was in fact completely broken. The test now asserts the run WORKED as
   well as that it stayed in its own lane
+
+### Milestone 7B — Workflow interface (implemented)
+- `app/web/` is a single static page mounted at `/app`, served by FastAPI. No
+  framework, no bundler, no `node_modules`, no external asset: function over
+  polish, and nothing new in the toolchain of a Python repo
+- **A static mount, not a route.** It adds nothing to the API surface and
+  cannot be mistaken for an endpoint. It calls the same endpoints any other
+  client would, which keeps it honest by construction: it can only show what
+  the API actually returns
+- **The display rules are pure functions in `display.js`, and the tests EXECUTE
+  them.** The UI is where this system's honesty reaches a screen — every
+  upstream milestone works to keep a missing measurement missing, and rendering
+  `null` as 0 at the last step would undo all of it. So rather than
+  string-matching the source, the tests run the real functions under Node and
+  assert the behaviour
+- `null` renders "not measured"; an observed `0` renders as the real
+  measurement `0`. The two are asserted to differ, which is the distinction the
+  whole system exists to keep
+- **An absent colour is never RED.** It renders as NONE with the reason beside
+  it, and the two absences read differently: "below the confidence floor" for a
+  scored-but-unclassified candidate, "no score exists" for an unscoreable one
+- The purchase proxy keeps its label wherever it appears, attention is never
+  labelled demand, and every dimension row states whether it can carry a score
+  magnitude at all
+- Missing-data reasons, blocked sub-score reasons, excluded dimensions, state
+  boundaries and limitations are all rendered rather than hidden. An unscoreable
+  candidate is presented as unmeasured, not rejected
+- A guard refuses `|| 0`-style coercion anywhere in the page source, because
+  that is precisely how a missing measurement becomes a zero
+- Node-backed tests skip cleanly where Node is absent; the structural guards
+  always run
