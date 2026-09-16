@@ -9,11 +9,17 @@ documents the eventual Postgres shape of the same data.
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import Enum
-from typing import Generic, TypeVar
+from typing import TYPE_CHECKING, Generic, TypeVar
 from uuid import UUID
 
 from app.domain.models import Candidate, EvidenceItem, EvidenceSnapshot
 from app.providers.base import KeywordDemandMetrics, MarketplaceListing, VideoObservation
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    # Imported for the annotation alone. Storage does not depend on the
+    # service layer at runtime; the record arrives already validated by its
+    # own constructor (SPEC_STEP_7_8.md §10 invariants).
+    from app.services.opportunity_scoring import ScoringResult
 
 DEFAULT_CACHE_TTL = timedelta(days=7)
 
@@ -77,6 +83,10 @@ class ResearchStore:
         self._video_cache: dict[
             tuple[str, str], tuple[datetime, list[VideoObservation], int]
         ] = {}
+        # Milestone 6F: scoring records, append-only like everything else.
+        # Keyed by (candidate_id, research_run_id); every write is retained so
+        # a rescore never destroys what an earlier one recorded.
+        self._scores: dict[tuple[UUID, UUID], list["ScoringResult"]] = {}
         self._cache_ttl = cache_ttl
 
     # ------------------------------------------------------------- research runs
@@ -202,6 +212,35 @@ class ResearchStore:
             list(listings),
             effective_limit,
         )
+
+    # --------------------------------------------------------- scoring state
+
+    def add_scoring_result(self, result: "ScoringResult") -> None:
+        """Record one Step 8 result. Append-only, like evidence.
+
+        Nothing is re-validated here: the §10 invariants are enforced by
+        `ScoringResult` itself, so a record that reached this point cannot
+        claim a score or a colour its state forbids.
+        """
+        key = (result.candidate_id, result.research_run_id)
+        self._scores.setdefault(key, []).append(result)
+
+    def scoring_history(
+        self, candidate_id: UUID, research_run_id: UUID
+    ) -> list["ScoringResult"]:
+        """Every scoring record for this scope, oldest first."""
+        return list(self._scores.get((candidate_id, research_run_id), []))
+
+    def latest_scoring_result(
+        self, candidate_id: UUID, research_run_id: UUID
+    ) -> "ScoringResult | None":
+        """The most recent record, or None when Step 8 has not run.
+
+        None means not even NOT_SCORED was recorded. It is the absence of an
+        attempt, and callers must not read it as a score of any kind.
+        """
+        history = self._scores.get((candidate_id, research_run_id))
+        return history[-1] if history else None
 
     # ------------------------------------------------- public-content video cache
 
