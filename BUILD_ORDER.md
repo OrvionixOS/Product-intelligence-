@@ -568,3 +568,50 @@ The original Milestone 3 scope is preserved in full; it is only decomposed.
   One survivor was found and fixed first: nothing asserted that a LIVE
   public-content fetch keeps the provider's own method, so marking every video
   record cache-sourced passed
+
+### Milestone 6C — Deep research boundary object, Step 7b (implemented)
+- `app/services/deep_research.py` derives the six Step 7 dimensions from the
+  **union** of cheap-pass and deep-pass evidence for one `(candidate, run)`
+  and emits SPEC_STEP_7_8.md §11's `DeepResearchResult`. `D2`–`D6` reuse the
+  existing 4A/4B/4E/4F/4D derivations unchanged; only `D1` is new, because §2
+  requires a distribution over observed keyword volumes and forbids the single
+  0–100 composite the 3C bridge produces
+- **Uniform, verified scope.** One candidate, one run, both checked before any
+  evidence is read. A mixed-scope collection is refused unread rather than
+  filtered — filtering silently answers a question nobody asked
+- **§4's input contract per dimension**: raw observables, `DimensionState`,
+  `missing_reason`, truth basis, sorted evidence ids, formula version,
+  conflict count and sample size. Step 8 cannot be handed a number this module
+  invented, because it computes none
+- **Required and POS-eligible are different properties, and the sets
+  overlap.** Competition structure and channel reach are REQUIRED — the
+  dossier is incomplete without them and ECS coverage counts them — and both
+  are contextual-only, POS-ineligible in V1 because their derivations refuse
+  magnitude. Price evidence is optional AND contextual. Every dimension states
+  all three flags, and a test asserts the POS-eligible and contextual sets
+  partition the surface exactly
+- **Conflict is disagreement, not repetition.** Two OBSERVED records of one
+  entity (keyword, listing, video) reporting different values conflict: they
+  are excluded from the derivation and counted. Identical repeat observations
+  are duplicates, which the 5B fingerprint rule already collapses, and an
+  UNKNOWN record never conflicts with an OBSERVED one — absence of a
+  measurement is not a competing measurement
+- MISSING, UNKNOWN and observed-zero stay three different things. A sample
+  size of None means the dimension could not report one; it is never 0, and an
+  observed zero volume is a real measurement that enters
+- **`preliminary_rank` appears nowhere**, in any form. Rank is selection-only
+  and carrying it forward would let triage policy leak into scoring, enforced
+  by a field guard and an AST guard over the module's symbols
+- Evidence Confidence (6A-1) is wired in over the dossier's own dimensions and
+  capability outcomes, including per-capability sample counts, so richer
+  evidence raises confidence and conflicts lower it
+- `DeepResearchState` is COMPLETE / PARTIAL / SCOPE_MISMATCH. PARTIAL is not a
+  low score: the dossier is still emitted in full, retaining what was
+  computable and naming what was not
+- The canonical `DIMENSION_ORDER` is load-bearing: the internal mapping is
+  deliberately written in a different order, so the emitted order cannot
+  quietly come from how the literal happened to be typed
+- 24 mutations of the milestone's boundaries were applied; 23 were killed and
+  one is a documented equivalent mutant — a redundant re-sort of dimension
+  evidence ids, kept as defence in depth because every current derivation
+  already sorts its own provenance
